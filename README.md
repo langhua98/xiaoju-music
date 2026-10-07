@@ -94,15 +94,28 @@ Telegram 的 webhook（见下方「重设 webhook」）。
 
 ## 部署流式服务
 
-流式服务（[`streamer/`](streamer/)）跑在 Hugging Face 的 Docker Space 上。**注意**：2026 年 9 月起，免费账号新建、复制、
-迁移（含改名）Docker Space 都要 PRO 订阅，已有的 Space 还能免费运行。拆成两个项目之前，音乐和抖音共用的是
-`langhua1998/douyin-proxy` 这一个 Space（线上现在还是那一份合并时期的代码）；拆开以后，音乐需要一个自己的 Space，
-视频继续用 `douyin-proxy`。
+流式服务（[`streamer/`](streamer/)）和小橘视频**合用** Hugging Face 的 Space `langhua1998/douyin-proxy`：
+视频的流式服务在根路径，音乐的放在 Space 的 `music/` 目录、挂在 **`/m`** 下，所以 Worker 的
+`STREAMER_URL` 是 `https://langhua1998-douyin-proxy.hf.space/m`。（2026 年 9 月起免费账号新建 Docker Space 要 PRO
+订阅，已有的这个还能免费跑，所以合用。）音乐起不来只影响 `/m`，视频照常跑。
 
-更新代码：把 `streamer/` 下的 `app.py`、`Dockerfile`、`requirements.txt`、`README.md`（顶部有 Space 的配置）和 `harvest/`
-推到这个 Space 的仓库，Space 会自动重新构建。**推之前先在机器人里发「统计」确认没有正在搬的歌**：Space 一重新构建，
-正在跑的搬歌就断了，排队的只在它的内存里。环境变量见 [`streamer/README.md`](streamer/README.md)；Worker
-填它的地址，两边的 `STREAMER_KEY` 设成同一个值。
+两边的机器人、密钥不一样，音乐自己的存成 `MUSIC_` 开头的 secret（Space → Settings → Variables and secrets）：
+
+| 名字 | 内容 |
+|---|---|
+| `MUSIC_TG_BOT_TOKEN` | 音乐机器人 @xiaoju_music_bot 的 token（和本 Worker 的 `TG_BOT_TOKEN` 相同） |
+| `MUSIC_STREAMER_KEY` | 和本 Worker 的 `STREAMER_KEY` 相同（和视频的不是同一个） |
+| `MUSIC_TG_USER_SESSION` | （可选）@xiaojumusic 频道主账号的登录凭证；不设就用视频那边的 `TG_USER_SESSION`（同一个人的账号时） |
+
+`TG_API_ID`、`TG_API_HASH` 两边共用。`MUSIC_TG_BOT_TOKEN` 和 `MUSIC_STREAMER_KEY` 都设了才会挂上 `/m`。
+
+更新代码：在 [langhua98/xiaoju-video](https://github.com/langhua98/xiaoju-video) 的 Actions 里跑 **Deploy streamer**，
+它把视频的 `streamer/` 和本仓库 `main` 上的 `streamer/app.py`、`streamer/harvest/` 一起推到 Space，Space 自动重新构建。
+Space 的 `Dockerfile`、`requirements.txt` 归视频仓库管：音乐要加新的 Python 依赖，记得也加进视频仓库的
+`streamer/requirements.txt`。**推之前先在机器人里发「统计」确认没有正在搬的歌**：Space 一重新构建，正在跑的搬歌就断了，
+排队的只在它的内存里；视频那边正在转的作品也会断。
+
+本仓库的 `streamer/Dockerfile` 留着，以后音乐有了自己的 Space 可以直接用（那时环境变量不用带 `MUSIC_` 前缀）。
 
 ## 改完代码后
 
@@ -120,7 +133,7 @@ Telegram 的 webhook（见下方「重设 webhook」）。
    ```bash
    ACC=aca35ff5f62ae4208757219dbc3b489b
    KV=738216f3f7d64f1ab143128406d1b35e
-   STREAMER_URL=https://langhua1998-douyin-proxy.hf.space      # 没部署流式服务就写空字符串
+   STREAMER_URL=https://langhua1998-douyin-proxy.hf.space/m    # 没部署流式服务就写空字符串
    curl -X PUT "https://api.cloudflare.com/client/v4/accounts/$ACC/workers/scripts/xiaoju-music" \
      -H "Authorization: Bearer $CLOUDFLARE_API_TOKEN" \
      -F "metadata={\"main_module\":\"worker.js\",\"compatibility_date\":\"2026-01-01\",\"keep_bindings\":[\"secret_text\"],\"bindings\":[{\"type\":\"kv_namespace\",\"name\":\"TRACKS\",\"namespace_id\":\"$KV\"},{\"type\":\"durable_object_namespace\",\"name\":\"LIB\",\"class_name\":\"Library\"},{\"type\":\"plain_text\",\"name\":\"CHANNEL_ID\",\"text\":\"-1003817921075\"},{\"type\":\"plain_text\",\"name\":\"CHANNEL_USERNAME\",\"text\":\"xiaojumusic\"},{\"type\":\"plain_text\",\"name\":\"STREAMER_URL\",\"text\":\"$STREAMER_URL\"}]};type=application/json" \
@@ -132,8 +145,7 @@ Telegram 的 webhook（见下方「重设 webhook」）。
    `page.html`、`admin.html` 以 `text/plain` 上传，就是 Workers 的文本模块，`worker.js` 里 `import` 进来当字符串用。
    也可以在本目录用 `wrangler deploy`（`wrangler.toml` 已写好绑定、迁移和 `.html` 文本模块规则，secret 不受影响）。
 
-3. 改了流式服务：把 `streamer/` 下的 `app.py`、`Dockerfile`、`requirements.txt`、`README.md` 和 `harvest/` 目录
-   （不要测试文件）推到音乐自己的 Space 的仓库，Space 会自动重新构建。
+3. 改了流式服务：推到本仓库 `main` 后，去 xiaoju-video 的 Actions 跑 **Deploy streamer**（见上方「部署流式服务」）。
 
 ## 日常维护
 
@@ -146,7 +158,7 @@ Telegram 的 webhook（见下方「重设 webhook」）。
     -d '{"name":"TG_BOT_TOKEN","text":"<新 token>","type":"secret_text"}'
   ```
 
-  流式服务在 Space 的 Settings 里改 `TG_BOT_TOKEN`。换完用新 token 打开
+  流式服务在 Space 的 Settings 里改 `MUSIC_TG_BOT_TOKEN`。换完用新 token 打开
   `https://api.telegram.org/bot<新 token>/getWebhookInfo`，确认 `url` 还指向本 Worker；不在了就重设。
 
 - **重设 webhook**（换了 Worker 地址、换了 `TG_WEBHOOK_SECRET`，或 webhook 丢了）：

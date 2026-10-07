@@ -17,6 +17,8 @@ Worker 遇到超过 20 MB 的歌，就把浏览器的 Range 请求转到这里�
   TG_CHANNEL                频道用户名，xiaojumusic
   STREAMER_KEY              Worker 转发请求时带的密钥（X-Key 请求头）
   TG_USER_SESSION           （可选）频道主账号的登录凭证，搬歌用；由 /login/verify 生成
+和小橘视频合用一个 Space 时（挂在它的 /m 下），两边的机器人、密钥不一样：音乐自己的值存成 MUSIC_ 开头的
+名字（MUSIC_TG_BOT_TOKEN、MUSIC_STREAMER_KEY……），有就用它，没有再用不带前缀的。
 """
 
 import asyncio
@@ -449,6 +451,12 @@ class Login:
         self.pending, self.need_password = None, False
         return client
 
+def settings():
+    """环境变量；MUSIC_ 开头的盖过同名不带前缀的（和小橘视频合用 Space 时，音乐的机器人、密钥存在这些名字下）"""
+    env = dict(os.environ)
+    env.update({k[len('MUSIC_'):]: v for k, v in os.environ.items() if k.startswith('MUSIC_') and v})
+    return env
+
 def make_client(env):
     # receive_updates=False：这个 MTProto 会话只调用、不订阅推送。机器人同时挂在官方 Bot API 上收
     # webhook，Telegram 给同一个机器人的推送可能只送到其中一个会话；这里要是订阅了，频道新帖的推送
@@ -496,7 +504,7 @@ async def bot_say(chat_id, text):
 @asynccontextmanager
 async def lifespan(app):
     global streamer
-    env = os.environ
+    env = settings()
     client = make_client(env)
     await client.start(bot_token=env['TG_BOT_TOKEN'])
     global bot_client, harvester
@@ -566,7 +574,7 @@ async def health():
 
 def check_key(request):
     got = request.headers.get('x-key', '').encode()
-    want = os.environ.get('STREAMER_KEY', '').encode()
+    want = settings().get('STREAMER_KEY', '').encode()
     if not want or not hmac.compare_digest(got, want):
         raise HTTPException(403)
 
@@ -632,7 +640,7 @@ async def viz(message_id: int, request: Request):
 # ── 登录、搬歌（都要 X-Key）─────────────────────────────────────────
 
 def target_channel():
-    return os.environ.get('TG_CHANNEL', 'xiaojumusic')
+    return settings().get('TG_CHANNEL', 'xiaojumusic')
 
 @app.post('/login/code')
 async def login_code(request: Request):

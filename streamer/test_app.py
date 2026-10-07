@@ -567,3 +567,21 @@ def test_request_ranking_prefers_the_artist_most_channels_have():
     res += [{'title': '发如雪', 'performer': '某人', 'duration': 70}]
     assert appmod.rank_requests('发如雪', res)[0]['performer'] == '周杰伦'
     assert appmod.rank_requests('发如雪', res)[-1]['performer'] == '某人'
+
+
+def test_music_prefixed_settings_win(monkeypatch):
+    # 和小橘视频合用 Space：不带前缀的是视频的，音乐的存在 MUSIC_ 开头的名字下
+    monkeypatch.setenv('STREAMER_KEY', 'video-key')
+    monkeypatch.setenv('MUSIC_STREAMER_KEY', 'music-key')
+    monkeypatch.setenv('TG_BOT_TOKEN', 'video-bot')
+    monkeypatch.setenv('MUSIC_TG_BOT_TOKEN', 'music-bot')
+    monkeypatch.setenv('TG_API_ID', '1')
+    monkeypatch.delenv('MUSIC_TG_CHANNEL', raising=False)
+    monkeypatch.delenv('TG_CHANNEL', raising=False)
+    env = appmod.settings()
+    assert env['TG_BOT_TOKEN'] == 'music-bot' and env['TG_API_ID'] == '1'
+    assert appmod.target_channel() == 'xiaojumusic'
+    monkeypatch.setattr(appmod, 'streamer', make(FakeTelegram()))
+    client = TestClient(appmod.app)
+    assert client.get('/stream/12', headers={'X-Key': 'video-key'}).status_code == 403
+    assert client.get('/stream/12', headers={'X-Key': 'music-key'}).status_code == 200

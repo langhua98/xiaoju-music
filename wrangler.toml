@@ -12,8 +12,8 @@ fallthrough = false
 [vars]
 CHANNEL_ID = "-1003817921075"
 CHANNEL_USERNAME = "xiaojumusic"
-# 大文件流式服务（streamer/，部署在 Hugging Face Space）的地址；留空则超过 20 MB 的歌不能播放
-STREAMER_URL = "https://langhua1998-douyin-proxy.hf.space"
+# 大文件流式服务（streamer/，和小橘视频合用 Hugging Face Space，音乐挂在 /m 下）的地址；留空则超过 20 MB 的歌不能播放
+STREAMER_URL = "https://langhua1998-douyin-proxy.hf.space/m"
 
 # 更早版本存歌单用的 KV：Durable Object 第一次启动时从这里迁移数据，之后不再读写
 [[kv_namespaces]]

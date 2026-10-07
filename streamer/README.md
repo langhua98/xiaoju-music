@@ -32,6 +32,10 @@ Telethon 以 `receive_updates=False` 登录：这个会话只调用、不订阅�
 | `TG_CHANNEL` | 频道用户名：`xiaojumusic` |
 | `STREAMER_KEY` | Worker 转发请求时带在 `X-Key` 请求头里的密钥，和 Worker 的 `STREAMER_KEY` 相同 |
 
+现在和小橘视频合用 Space `langhua1998/douyin-proxy`（挂在 `/m` 下）：上面这些名字在那里是视频的，音乐自己的值存成
+`MUSIC_` 开头的名字（`MUSIC_TG_BOT_TOKEN`、`MUSIC_STREAMER_KEY`，可选 `MUSIC_TG_USER_SESSION`、`MUSIC_TG_CHANNEL`），
+有 `MUSIC_` 的就用它，没有再用不带前缀的。部署方式见仓库根目录的 README「部署流式服务」。
+
 ## 接口
 
 - `GET /`：健康检查
