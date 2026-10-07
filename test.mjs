@@ -1,0 +1,1006 @@
+// 本地测试：Node 自带的 SQLite 模拟 Durable Object，再模拟 Telegram 和流式服务，逐条验证 worker.js
+import assert from 'node:assert/strict';
+import { register } from 'node:module';
+import { DatabaseSync } from 'node:sqlite';
+
+register('./test/hooks.mjs', import.meta.url);
+const { default: worker, Library } = await import('./worker.js');
+
+const TOKEN = '123:SECRET-BOT-TOKEN';
+const HOOK = 'hook-secret';
+const ADMIN = 'admin-key-123';
+const SKEY = 'streamer-key-456';
+const STREAMER = 'https://streamer.example';
+const CHANNEL = -1003817921075;
+const MB = 1024 * 1024;
+const LIMIT = 20 * MB;
+
+// ── 模拟 Durable Object（SQLite + 结构化克隆，和 RPC 一样不共享引用）──
+function makeSql(db = new DatabaseSync(':memory:')) {
+  return { exec: (query, ...params) => { const rows = db.prepare(query).all(...params).map(r => ({ ...r })); return { toArray: () => rows }; } };
+}
+async function makeLibrary(env, db) {
+  let ready;
+  const ctx = { storage: { sql: makeSql(db) }, blockConcurrencyWhile(fn) { ready = fn(); return ready; } };
+  const lib = new Library(ctx, env);
+  await ready;
+  return new Proxy({}, {
+    get: (_, name) => name === 'then' ? undefined : async (...args) => structuredClone(await lib[name](...structuredClone(args))),
+  });
+}
+// 更早版本的 KV：每页只给 1 条，逼出分页
+function makeKV(records) {
+  const m = new Map(records.map(r => ['t:' + r.id, JSON.stringify(r)]));
+  return {
+    async get(k, type) { const v = m.get(k); return v == null ? null : type === 'json' ? JSON.parse(v) : v; },
+    async list({ prefix, cursor }) {
+      const keys = [...m.keys()].filter(k => k.startsWith(prefix)).sort();
+      const start = cursor ? Number(cursor) : 0;
+      const done = start + 1 >= keys.length;
+      return { keys: keys.slice(start, start + 1).map(name => ({ name })), list_complete: done, cursor: done ? '' : String(start + 1) };
+    },
+  };
+}
+
+// ── 模拟 Telegram（小文件）和流式服务（大文件）──
+const files = new Map();   // file_id -> 字节（Bot API 能取的小文件）
+const bigFiles = new Map(); // 消息号 -> 字节（只有流式服务取得到）
+const thumbs = new Map();   // 消息号 -> 封面字节（流式服务用 MTProto 取的那种）
+const oldPhotos = new Map(); // 更早的图片帖：消息号 -> 字节（只有流式服务取得到）
+let seq = 0;
+const addFile = bytes => { const id = 'F' + (++seq); files.set(id, bytes); return id; };
+const bytesOf = (n, seed) => { const b = new Uint8Array(n); for (let i = 0; i < n; i++) b[i] = (i * 7 + seed + (i >> 12)) & 255; return b; };
+const calls = [];
+const OWNER = 777, FAN = 555;
+const bot = { out: [], toStreamer: [], search: [], pickId: 0, autoStatus: { status: 'idle' }, adminAsks: 0, copyBusy: false, streamerDown: false, copyFail: '' };
+const mode = { getFile: 'ok', expireOnce: false, streamer: 'ok', thumbs: 'ok', lrclib: 'ok', netease: 'ok', viz: 'ok' };
+// 模拟歌词来源：LRCLIB 的歌词库，网易云的歌和歌词
+const lrclibDb = [];
+const neteaseDb = [];
+const neteaseLyrics = new Map();
+const nn = s => String(s || '').toLowerCase().replace(/[^\p{L}\p{N}]+/gu, '');
+const DAY = 24 * 3600 * 1000;
+// 每句隔 4 秒：[00:01.50]、[00:05.50]……
+const lrcOf = words => words.map((w, i) => `[00:${String(1 + i * 4).padStart(2, '0')}.50]${w}`).join('\n');
+const JPEG = n => Uint8Array.from([0xff, 0xd8, 0xff, 0xe0, ...bytesOf(n, n)]);
+
+function serve(bytes, range, extraHeaders = {}) {
+  if (!range) return new Response(bytes, { headers: { 'Content-Length': String(bytes.length), ...extraHeaders } });
+  const [a, b] = range.replace('bytes=', '').split('-');
+  const start = Number(a), end = b ? Number(b) : bytes.length - 1;
+  return new Response(bytes.slice(start, end + 1), {
+    status: 206, headers: { 'Content-Length': String(end - start + 1), 'Content-Range': `bytes ${start}-${end}/${bytes.length}`, ...extraHeaders },
+  });
+}
+
+globalThis.fetch = async (input, init = {}) => {
+  const url = String(input);
+  const headers = new Headers(init.headers || {});
+  calls.push({ url, range: headers.get('Range'), key: headers.get('X-Key') });
+  let m;
+  if ((m = url.match(/^https:\/\/streamer\.example\/photos\?upto=(\d+)$/))) {
+    assert.equal(headers.get('X-Key'), SKEY);
+    return Response.json({ photos: [...oldPhotos.keys()].filter(id => id <= Number(m[1])) });
+  }
+  if ((m = url.match(/^https:\/\/streamer\.example\/photo\/(\d+)$/))) {
+    const img = oldPhotos.get(Number(m[1]));
+    return img ? new Response(img, { headers: { 'Content-Type': 'image/jpeg' } }) : Response.json({ detail: 'Not Found' }, { status: 404 });
+  }
+  if ((m = url.match(/^https:\/\/streamer\.example\/thumb\/(\d+)$/))) {
+    if (mode.thumbs === 'down') throw new TypeError('fetch failed');
+    if (mode.thumbs === 'starting') return new Response('<html>starting</html>', { headers: { 'Content-Type': 'text/html' } });
+    assert.equal(headers.get('X-Key'), SKEY);
+    const img = thumbs.get(Number(m[1]));
+    return img ? new Response(img, { headers: { 'Content-Type': 'image/jpeg' } }) : Response.json({ detail: 'Not Found' }, { status: 404 });
+  }
+  if ((m = url.match(/^https:\/\/streamer\.example\/viz\/(\d+)$/))) {
+    if (mode.viz === 'down') throw new TypeError('fetch failed');
+    if (mode.viz === 'starting') return new Response('<html>starting</html>', { headers: { 'Content-Type': 'text/html' } });
+    assert.equal(headers.get('X-Key'), SKEY);
+    if (Number(m[1]) === 404) return Response.json({ detail: 'Not Found' }, { status: 404 });
+    return new Response(Uint8Array.from([0x58, 0x56, 1, 15, 2, 0x12, 0xf0, Number(m[1]) & 255]), { headers: { 'Content-Type': 'application/octet-stream' } });
+  }
+  if ((m = url.match(/^https:\/\/streamer\.example\/stream\/(\d+)$/))) {
+    if (mode.streamer === 'down') throw new TypeError('fetch failed');
+    if (mode.streamer === 'starting') return new Response('<html>Space is starting</html>', { headers: { 'Content-Type': 'text/html' } });
+    if (mode.streamer === '502') return new Response('Bad Gateway', { status: 502 });
+    assert.equal(headers.get('X-Key'), SKEY);
+    const f = bigFiles.get(Number(m[1]));
+    if (!f) return new Response('Not Found', { status: 404 });
+    if (mode.streamer === 'short') return new Response(f.slice(0, 10), { status: headers.get('Range') ? 206 : 200, headers: { 'Content-Length': '10' } });
+    return serve(f, headers.get('Range'), { 'Content-Type': 'application/octet-stream' });
+  }
+  if (url.startsWith('https://lrclib.net/api/search?')) {
+    if (mode.lrclib === 'down') return new Response('oops', { status: 500 });
+    assert.match(headers.get('User-Agent'), /xiaoju-music/);
+    const p = new URL(url).searchParams;
+    return Response.json(lrclibDb.filter(e => p.has('q')
+      ? nn(p.get('q')).includes(nn(e.trackName))
+      : nn(e.trackName).includes(nn(p.get('track_name'))) && (!p.has('artist_name') || nn(e.artistName).includes(nn(p.get('artist_name'))))));
+  }
+  if (url === 'https://music.163.com/api/cloudsearch/pc') {
+    if (mode.netease === 'down') throw new TypeError('fetch failed');
+    assert.equal(init.method, 'POST');
+    assert.equal(headers.get('Referer'), 'https://music.163.com/');
+    const q = nn(new URLSearchParams(init.body).get('s'));
+    return Response.json({ code: 200, result: { songs: neteaseDb.filter(x => q.includes(nn(x.name.replace(/\s*[(（].*$/, '')))) } });
+  }
+  if ((m = url.match(/^https:\/\/music\.163\.com\/api\/song\/lyric\?id=(\d+)&/))) {
+    return Response.json({ code: 200, lrc: { version: 1, lyric: neteaseLyrics.get(Number(m[1])) || '' } });
+  }
+  // 机器人要用的流式服务接口：记下收到的请求，按 bot 里设好的回
+  if ((m = url.match(/^https:\/\/streamer\.example\/(fulfill|copy\/start|copy\/pick|auto\/start|auto\/status|search\/global|harvest)(?:\?(.*))?$/)) || url === STREAMER + '/') {
+    if (bot.streamerDown) throw new TypeError('fetch failed');
+    if (url === STREAMER + '/') return Response.json({ ok: true });
+    assert.equal(headers.get('X-Key'), SKEY);
+    const body = init.body ? JSON.parse(init.body) : null;
+    bot.toStreamer.push({ path: m[1], body, query: m[2] || '' });
+    if (m[1] === 'search/global') return Response.json({ results: bot.search });
+    if (m[1] === 'copy/pick') return Response.json({ new_ids: [bot.pickId] });
+    if (m[1] === 'copy/start' && bot.copyBusy) return Response.json({ detail: 'already running' }, { status: 409 });
+    if (m[1] === 'auto/status') return Response.json(bot.autoStatus);
+    if (m[1] === 'harvest') {
+      if (/example\.com/.test(body.url)) return Response.json({ detail: '这个网站还不支持' }, { status: 400 });
+      if (bot.copyBusy) return Response.json({ detail: 'already running' }, { status: 409 });
+      return Response.json({ ok: true, site: '互联网档案馆 archive.org' });
+    }
+    return Response.json({ ok: true });
+  }
+  assert.ok(url.startsWith('https://api.telegram.org/'), 'unexpected fetch ' + url);
+  if ((m = url.match(/\/bot[^/]+\/(sendMessage|answerCallbackQuery|getChatAdministrators|editMessageText|setMyCommands|editMessageReplyMarkup|deleteMessage)$/))) {
+    const body = JSON.parse(init.body);
+    if (m[1] === 'getChatAdministrators') {
+      assert.equal(String(body.chat_id), String(CHANNEL));
+      bot.adminAsks++;
+      return Response.json({ ok: true, result: [{ status: 'administrator', user: { id: 1 } }, { status: 'creator', user: { id: OWNER } }] });
+    }
+    bot.out.push({ method: m[1], ...body });
+    return Response.json({ ok: true, result: m[1] === 'sendMessage' ? { message_id: 9000 + bot.out.length } : {} });
+  }
+  if ((m = url.match(/\/bot[^/]+\/getFile\?file_id=(.+)$/))) {
+    const f = files.get(decodeURIComponent(m[1]));
+    if (!f) return Response.json({ ok: false, error_code: 400, description: 'Bad Request: invalid file_id' });
+    if (mode.getFile === 'fail') return Response.json({ ok: false, error_code: 500, description: 'Internal Server Error' });
+    return Response.json({ ok: true, result: { file_path: 'music/' + m[1] + '.bin' } });
+  }
+  if ((m = url.match(/\/file\/bot[^/]+\/music\/(.+)\.bin$/))) {
+    if (mode.expireOnce) { mode.expireOnce = false; return new Response('Not Found', { status: 404 }); }
+    return serve(files.get(m[1]), headers.get('Range'));
+  }
+  throw new Error('unexpected fetch ' + url);
+};
+
+// ── 被测环境 ──
+const oldTracks = [
+  { id: 4, kind: 'audio', file_id: addFile(bytesOf(3000, 4)), file_unique_id: 'U4', title: '谁', performer: '张万森 @auvvip', name: '张万森 谁.mp3', mime: 'audio/mpeg', size: 3000, duration: 291, date: 1, caption: '' },
+  { id: 12, kind: 'audio', file_id: 'BIG12', file_unique_id: 'U12', title: '抖音热播 Vol.12', performer: '', name: 'vol12.mp3', mime: 'audio/mpeg', size: 25 * MB, duration: 7209, date: 2, caption: '' },
+];
+bigFiles.set(12, bytesOf(25 * MB, 12));
+const env = {
+  TG_BOT_TOKEN: TOKEN, TG_WEBHOOK_SECRET: HOOK, ADMIN_KEY: ADMIN, STREAMER_KEY: SKEY, STREAMER_URL: STREAMER + '/',
+  CHANNEL_ID: String(CHANNEL), CHANNEL_USERNAME: 'xiaojumusic', TRACKS: makeKV(oldTracks),
+};
+const lib = await makeLibrary(env);
+env.LIB = { idFromName: n => n, get: () => lib };
+
+const BASE = 'https://xiaoju-music.example.workers.dev';
+const req = (path, init) => worker.fetch(new Request(BASE + path, init), env);
+const hook = (update, secret = HOOK) => req('/tg-webhook', {
+  method: 'POST', headers: { 'Content-Type': 'application/json', 'X-Telegram-Bot-Api-Secret-Token': secret }, body: JSON.stringify(update),
+});
+const admin = (action, payload, key = ADMIN) => req('/admin/api/' + action, payload === undefined
+  ? { headers: { Authorization: 'Bearer ' + key } }
+  : { method: 'POST', headers: { Authorization: 'Bearer ' + key, 'Content-Type': 'application/json' }, body: JSON.stringify(payload) });
+const chat = { id: CHANNEL, type: 'channel', username: 'xiaojumusic', title: '小橘🍊音乐' };
+const audioPost = (id, extra = {}) => ({ message_id: id, chat, date: 1700000000 + id, audio: { file_name: `song${id}.mp3`, mime_type: 'audio/mpeg', title: '歌' + id, file_unique_id: 'U' + id, ...extra } });
+
+const seen = []; // 所有响应的开头和头部，最后查有没有泄露
+async function bytes(res) {
+  const b = new Uint8Array(await res.arrayBuffer());
+  seen.push(new TextDecoder().decode(b.slice(0, 4000)) + JSON.stringify([...res.headers]));
+  return b;
+}
+const textOf = async res => new TextDecoder().decode(await bytes(res));
+const jsonOf = async res => JSON.parse(await textOf(res));
+const publicTracks = async () => (await jsonOf(await req('/api/tracks'))).tracks;
+const find = (list, id) => list.find(t => t.id === id);
+const same = (got, src, from, to) => { assert.equal(got.length, to - from); assert.ok(Buffer.from(got).equals(Buffer.from(src.subarray(from, to))), `bytes ${from}-${to} 不一致`); };
+
+let n = 0;
+async function t(name, fn) { await fn(); n++; console.log('ok', name); }
+
+// ─────────────────────────────────────────────────────────────
+await t('第一次启动把 KV 里的旧歌单迁进来（分页读全）；大文件在流式服务开着时可以播', async () => {
+  const list = await publicTracks();
+  assert.deepEqual(list.map(x => x.id), [12, 4]);
+  assert.deepEqual([find(list, 4).big, find(list, 4).playable], [false, true]);
+  assert.deepEqual([find(list, 12).big, find(list, 12).playable], [true, true]);
+  assert.equal(find(list, 4).artist, '张万森'); // 「张万森 @auvvip」去掉转发来源
+  assert.ok(!JSON.stringify(list).includes('file_id') && !JSON.stringify(list).includes('performer'));
+});
+
+await t('切片那一版的数据库：歌搬进 songs，状态列、chats 表、仓库配置都清掉，不再从 KV 重搬', async () => {
+  const db = new DatabaseSync(':memory:');
+  db.exec(`CREATE TABLE tracks (id INTEGER PRIMARY KEY, rec TEXT NOT NULL, status TEXT NOT NULL, note TEXT NOT NULL DEFAULT '',
+    attempts INTEGER NOT NULL DEFAULT 0, updated INTEGER NOT NULL DEFAULT 0)`);
+  db.exec('CREATE TABLE chats (id TEXT PRIMARY KEY, title TEXT NOT NULL, status TEXT NOT NULL, updated INTEGER NOT NULL)');
+  db.exec('CREATE TABLE config (k TEXT PRIMARY KEY, v TEXT NOT NULL)');
+  db.prepare('INSERT INTO tracks VALUES (?, ?, ?, ?, ?, ?)').run(7, JSON.stringify({ ...oldTracks[0], id: 7, title: '旧版里的歌' }), 'ok', '', 0, 5);
+  db.prepare('INSERT INTO tracks VALUES (?, ?, ?, ?, ?, ?)').run(51, JSON.stringify({ ...oldTracks[1], id: 51 }), 'pending', '没响应', 0, 6);
+  db.exec("INSERT INTO chats VALUES ('-100999', '小橘仓库', 'administrator', 1)");
+  db.exec("INSERT INTO config VALUES ('migrated', '1'), ('storage', '-100999'), ('storageTitle', '小橘仓库')");
+  const old = await makeLibrary({ TRACKS: makeKV(oldTracks) }, db);
+  assert.deepEqual((await old.listTracks()).map(x => x.id), [51, 7]); // 没有再从 KV 搬 4 和 12
+  const tables = db.prepare("SELECT name FROM sqlite_master WHERE type = 'table' ORDER BY name").all().map(r => r.name);
+  assert.deepEqual(tables, ['asks', 'config', 'covers', 'logo_covers', 'lyrics', 'photos', 'playlists', 'songs', 'viz']);
+  assert.deepEqual(db.prepare('SELECT k FROM config ORDER BY k').all().map(r => r.k), ['coversV', 'migrated']);
+  await makeLibrary({}, db); // 再启动一次：什么都不用做，也不报错
+  assert.equal((await old.getTrack(7)).title, '旧版里的歌');
+});
+
+await t('webhook：密钥错误 403；登记 mp3、m4a（纠正类型）、wav 文件、语音；非音频和别的聊天忽略', async () => {
+  assert.equal((await hook({ channel_post: audioPost(5) }, 'wrong')).status, 403);
+  await hook({ channel_post: audioPost(9, { file_id: addFile(bytesOf(5000, 9)), file_size: 5000, performer: '更多音乐 @auvvip' }) });
+  await hook({ channel_post: audioPost(10, { file_name: '我太笨.m4a', file_id: addFile(bytesOf(100, 1)), file_size: 100 }) });
+  await hook({ channel_post: { message_id: 11, chat, document: { file_name: 'Transformer interview .wav', mime_type: 'audio/x-wav', file_id: addFile(bytesOf(200, 2)), file_unique_id: 'U11', file_size: 200 } } });
+  await hook({ channel_post: { message_id: 13, chat, voice: { duration: 5, mime_type: 'audio/ogg', file_id: addFile(bytesOf(50, 3)), file_unique_id: 'U13', file_size: 50 } } });
+  await hook({ channel_post: { message_id: 14, chat, document: { file_name: 'a.png', mime_type: 'image/png', file_id: 'P', file_size: 9 } } });
+  await hook({ channel_post: { message_id: 15, chat, document: { file_name: 'm.mp4', mime_type: 'video/mp4', file_id: 'V', file_size: 9 } } });
+  await hook({ channel_post: { message_id: 16, chat, text: 'hello' } });
+  await hook({ channel_post: { message_id: 17, chat: { id: -100555, type: 'channel' }, audio: { file_id: 'X', file_size: 1 } } });
+  await hook({ message: { message_id: 18, chat: { id: 5, type: 'private' }, audio: { file_id: 'Y' } } });
+  const list = await publicTracks();
+  assert.deepEqual(list.map(x => x.id), [13, 12, 11, 10, 9, 4]);
+  assert.equal(find(list, 10).mime, 'audio/mp4');
+  assert.equal(find(list, 11).title, 'Transformer interview');
+  assert.equal(find(list, 11).mime, 'audio/wav');
+  assert.equal(find(list, 13).title, '语音 #13');
+});
+
+await t('歌单里的歌名和歌手：去掉「更多音乐」和 @频道；「歌手 - 歌名」拆开；有歌手时不拆', async () => {
+  await hook({ channel_post: audioPost(60, { performer: '更多音乐 @auvvip', title: '泪海', file_id: 'X60', file_size: 9 }) });
+  await hook({ channel_post: audioPost(61, { performer: '', title: '魏佳艺 - 掌心之中', file_id: 'X61', file_size: 9 }) });
+  await hook({ channel_post: audioPost(62, { performer: '小柯', title: 'A - B', file_id: 'X62', file_size: 9 }) });
+  const list = await publicTracks();
+  assert.deepEqual([find(list, 60).title, find(list, 60).artist], ['泪海', '']);
+  assert.deepEqual([find(list, 61).title, find(list, 61).artist], ['掌心之中', '魏佳艺']);
+  assert.deepEqual([find(list, 62).title, find(list, 62).artist], ['A - B', '小柯']);
+  for (const id of [60, 61, 62]) await admin('remove', { track: id });
+});
+
+await t('封面：新歌用 Bot API 取缩略图，取一次就存下，之后不再找 Telegram', async () => {
+  const img = JPEG(300);
+  await hook({ channel_post: audioPost(70, { file_id: addFile(bytesOf(10, 7)), file_size: 10, thumbnail: { file_id: addFile(img), width: 320, height: 320 } }) });
+  calls.length = 0;
+  let r = await req('/c/70');
+  assert.equal(r.status, 200);
+  assert.equal(r.headers.get('Content-Type'), 'image/jpeg');
+  assert.match(r.headers.get('Cache-Control'), /max-age=604800/);
+  assert.ok(Buffer.from(await bytes(r)).equals(Buffer.from(img)));
+  assert.equal(calls.filter(c => c.url.includes('api.telegram.org')).length, 2); // getFile + 下载
+  calls.length = 0;
+  r = await req('/c/70');
+  assert.ok(Buffer.from(await bytes(r)).equals(Buffer.from(img)));
+  assert.equal(calls.length, 0, '第二次直接从数据库出');
+});
+
+await t('封面：更早登记的歌（没记缩略图）请流式服务取，同样只取一次', async () => {
+  const img = JPEG(500);
+  thumbs.set(4, img);
+  calls.length = 0;
+  let r = await req('/c/4');
+  assert.equal(r.status, 200);
+  assert.ok(Buffer.from(await bytes(r)).equals(Buffer.from(img)));
+  assert.deepEqual(calls.map(c => [c.url, c.key]), [[STREAMER + '/thumb/4', SKEY]]);
+  calls.length = 0;
+  r = await req('/c/4');
+  await bytes(r);
+  assert.equal(calls.length, 0);
+});
+
+await t('封面：频道里一张图片都没有时记为没有；语音、不存在的歌 404', async () => {
+  await hook({ channel_post: audioPost(71, { file_id: addFile(bytesOf(10, 8)), file_size: 10 }) }); // 帖子里没有缩略图
+  calls.length = 0;
+  let r = await req('/c/71');
+  assert.equal(r.status, 404);
+  assert.match(r.headers.get('Cache-Control'), /max-age=86400/);
+  await textOf(r);
+  assert.deepEqual(calls.map(c => c.url), [STREAMER + '/photos?upto=371'], '只扫一次频道图片');
+  calls.length = 0;
+  assert.equal((await req('/c/71')).status, 404);
+  assert.equal(calls.length, 0, '记下「没有」后不再去取');
+  assert.equal((await req('/c/999')).status, 404);
+  await lib.putCover(71, 'none', ''); // 留着给下一项用
+});
+
+await t('封面：没有自带封面的歌，从频道图片帖里随机挑一张，挑定就不再变', async () => {
+  const newPhoto = JPEG(90);
+  // 新发的图片帖由 webhook 记下（带 Bot API 的 file_id），取边长不超过 800 的最大一档
+  await hook({ channel_post: { message_id: 80, chat, photo: [
+    { file_id: addFile(JPEG(10)), width: 90, height: 90 },
+    { file_id: addFile(newPhoto), width: 800, height: 600 },
+    { file_id: addFile(JPEG(20)), width: 1280, height: 960 },
+  ] } });
+  assert.deepEqual(await lib.listPhotos(), [{ id: 80, file_id: [...files.entries()].find(([, v]) => v === newPhoto)[0] }]);
+  await hook({ channel_post: audioPost(73, { file_id: addFile(bytesOf(10, 3)), file_size: 10 }) });
+  let r = await req('/c/73');
+  assert.equal(r.status, 200);
+  assert.ok(Buffer.from(await bytes(r)).equals(Buffer.from(newPhoto)));
+  calls.length = 0;
+  r = await req('/c/73');
+  await bytes(r);
+  assert.equal(calls.length, 0, '挑定的图存下了');
+  // 语音也用频道图片
+  r = await req('/c/13');
+  assert.equal(r.status, 200);
+  await bytes(r);
+  // 播放页要的是「自己的专辑图」（?art=1）：配的频道图片当没有，好让网页画文字封面；自带封面照给
+  r = await req('/c/73?art=1');
+  assert.equal(r.status, 404);
+  await bytes(r);
+  r = await req('/c/13?art=1');
+  assert.equal(r.status, 404);
+  await bytes(r);
+  r = await req('/c/4?art=1');
+  assert.equal(r.status, 200);
+  await bytes(r);
+  // 歌单接口带上 art：判断过封面的歌标 1/0，网页就不用一首首去试
+  const arts = Object.fromEntries((await lib.listTracks()).map(t => [t.id, t.art]));
+  assert.equal(arts[73], 0);
+  assert.equal(arts[13], 0);
+  assert.equal(arts[4], 1);
+  for (const id of [71, 73]) await admin('remove', { track: id });
+});
+
+await t('封面：更早的图片帖（webhook 没见过）由流式服务扫出来、下载', async () => {
+  const db = new DatabaseSync(':memory:');
+  const fresh = await makeLibrary({}, db);
+  const env2 = { ...env, LIB: { idFromName: n => n, get: () => fresh } };
+  oldPhotos.set(5, JPEG(77));
+  await fresh.upsertTrack({ id: 90, kind: 'audio', file_id: 'X90', file_unique_id: 'U90', thumb: '', title: '没封面', performer: '', name: 'a.flac', mime: 'audio/flac', size: 9, duration: 1, date: 1, caption: '' });
+  const r = await worker.fetch(new Request(BASE + '/c/90'), env2);
+  assert.equal(r.status, 200);
+  assert.ok(Buffer.from(await bytes(r)).equals(Buffer.from(oldPhotos.get(5))));
+  assert.deepEqual(await fresh.listPhotos(), [{ id: 5, file_id: '' }]);
+});
+
+await t('封面：流式服务没醒（连不上、回网页）就 503，不存，醒了再取', async () => {
+  // 模拟更早登记的歌：记录里没有 thumb 字段，只能请流式服务取
+  await lib.upsertTrack({ id: 72, kind: 'audio', file_id: 'X72', file_unique_id: 'U72', title: '旧歌', performer: '', name: 'old.mp3', mime: 'audio/mpeg', size: 9, duration: 1, date: 1, caption: '' });
+  thumbs.set(72, JPEG(200));
+  for (const m of ['down', 'starting']) {
+    mode.thumbs = m;
+    const r = await req('/c/72');
+    assert.equal(r.status, 503, m);
+    assert.equal(r.headers.get('Retry-After'), '60');
+    await textOf(r);
+  }
+  mode.thumbs = 'ok';
+  const r = await req('/c/72');
+  assert.equal(r.status, 200);
+  assert.ok(Buffer.from(await bytes(r)).equals(Buffer.from(thumbs.get(72))));
+  await admin('remove', { track: 72 });
+});
+
+await t('封面：帖子换了文件就作废重取；删歌时封面一起删', async () => {
+  const img2 = JPEG(120);
+  await hook({ edited_channel_post: audioPost(70, { file_id: addFile(bytesOf(10, 9)), file_unique_id: 'U70-new', file_size: 10, thumbnail: { file_id: addFile(img2) } }) });
+  let r = await req('/c/70');
+  assert.ok(Buffer.from(await bytes(r)).equals(Buffer.from(img2)));
+  await hook({ edited_channel_post: { ...audioPost(70, { file_id: 'same', file_unique_id: 'U70-new', file_size: 10, thumbnail: { file_id: 'unused' } }), caption: '只改说明' } });
+  calls.length = 0;
+  r = await req('/c/70');
+  assert.ok(Buffer.from(await bytes(r)).equals(Buffer.from(img2)));
+  assert.equal(calls.length, 0, '同一个文件，封面沿用');
+  await admin('remove', { track: 70 });
+  assert.equal((await lib.getCover(70)), null);
+  await admin('remove', { track: 71 });
+});
+
+await t('歌词：LRCLIB 有时长对得上、带时间轴的就用它（歌手、时长不对的不要），存下来，下次不再出去找', async () => {
+  await hook({ channel_post: audioPost(30, { title: '夜曲', performer: '周杰伦', duration: 226, file_id: 'X30', file_size: 9 }) });
+  lrclibDb.push(
+    { trackName: '夜曲', artistName: '别人', duration: 226, syncedLyrics: lrcOf(['翻唱1', '翻唱2', '翻唱3', '翻唱4', '翻唱5']) },
+    { trackName: '夜曲', artistName: '周杰伦', duration: 250, syncedLyrics: lrcOf(['长版1', '长版2', '长版3', '长版4', '长版5']) },
+    { trackName: '夜曲', artistName: '周杰伦', duration: 227.5, syncedLyrics: '[ti:夜曲]\n' + lrcOf(['一群嗜血的蚂蚁', '被腐肉所吸引', '我面无表情', '看孤独的风景', '失去你']) },
+  );
+  calls.length = 0;
+  const r = await req('/l/30');
+  assert.equal(r.status, 200);
+  assert.match(r.headers.get('Cache-Control'), /max-age=300/);
+  assert.equal(r.headers.get('Access-Control-Allow-Origin'), '*');
+  const d = await jsonOf(r);
+  assert.equal(d.src, 'lrclib');
+  assert.equal(d.synced, true);
+  assert.equal(d.lines.length, 5);
+  assert.deepEqual(d.lines[0], [1.5, '一群嗜血的蚂蚁']);
+  assert.ok(calls.length && calls.every(c => c.url.startsWith('https://lrclib.net/')), 'LRCLIB 找到了就不问网易云');
+  calls.length = 0;
+  await jsonOf(await req('/l/30'));
+  assert.equal(calls.length, 0, '第二次直接从数据库出');
+});
+
+await t('歌词：LRCLIB 没有就问网易云（挑时长最接近的）；网易云开头 JSON 格式的演职员行也认得', async () => {
+  await hook({ channel_post: audioPost(31, { title: '谪仙 (DJ版)', performer: '伊格赛听、叶里', duration: 181, file_id: 'X31', file_size: 9 }) });
+  neteaseDb.push({ id: 501, name: '谪仙', ar: [{ name: '伊格赛听' }], dt: 240000 }, { id: 502, name: '谪仙 (DJ版)', ar: [{ name: '伊格赛听' }, { name: '叶里' }], dt: 180500 });
+  neteaseLyrics.set(501, lrcOf(['原版1', '原版2', '原版3', '原版4', '原版5']));
+  neteaseLyrics.set(502, '{"t":0,"c":[{"tx":"作词: "},{"tx":"某某"}]}\n' + lrcOf(['画卷里的人', '一笔一画', '谪仙', '醉饮', '长歌']));
+  const d = await jsonOf(await req('/l/31'));
+  assert.equal(d.src, 'netease');
+  assert.equal(d.synced, true);
+  assert.deepEqual(d.lines.slice(0, 2), [[0, '作词: 某某'], [1.5, '画卷里的人']]);
+});
+
+await t('歌词：时长都对不上就只给文字；哪儿都没有记成「没有」、过段时间再找；外面出错时不乱下结论', async () => {
+  await hook({ channel_post: audioPost(32, { title: '晴天', performer: '周杰伦', duration: 269, file_id: 'X32', file_size: 9 }) });
+  lrclibDb.push({ trackName: '晴天', artistName: '周杰伦', duration: 309, syncedLyrics: lrcOf(['故事的小黄花', '从出生那年就飘着', '童年的荡秋千', '随记忆一直晃到现在', 'Re So So Si Do Si La']) });
+  let d = await jsonOf(await req('/l/32'));
+  assert.equal(d.src, 'lrclib');
+  assert.equal(d.synced, false);
+  assert.deepEqual(d.lines[0], [null, '故事的小黄花']);
+
+  await hook({ channel_post: audioPost(33, { title: '没人唱过的歌', performer: '无名', duration: 100, file_id: 'X33', file_size: 9 }) });
+  d = await jsonOf(await req('/l/33'));
+  assert.deepEqual(d, { src: 'none', synced: false, lines: [] });
+  const due = (await lib.getLyrics(33)).retry_at;
+  assert.ok(due > Date.now() + 13 * DAY && due < Date.now() + 15 * DAY);
+  calls.length = 0;
+  await jsonOf(await req('/l/33'));
+  assert.equal(calls.length, 0, '记成「没有」之后先不再找');
+  await lib.putLyrics(33, 'none', '', Date.now() - 1); // 到了该再找的时候
+  lrclibDb.push({ trackName: '没人唱过的歌', artistName: '无名', duration: 101, syncedLyrics: lrcOf(['终于', '有人', '写了', '这首', '歌词']) });
+  d = await jsonOf(await req('/l/33'));
+  assert.deepEqual([d.src, d.synced], ['lrclib', true]);
+  assert.equal((await lib.getLyrics(33)).retry_at, 0);
+
+  // LRCLIB 出错、网易云没有：先当没有，一天后就再找
+  await hook({ channel_post: audioPost(34, { title: '另一首', performer: '无名', duration: 100, file_id: 'X34', file_size: 9 }) });
+  mode.lrclib = 'down';
+  d = await jsonOf(await req('/l/34'));
+  assert.equal(d.src, 'none');
+  assert.ok((await lib.getLyrics(34)).retry_at < Date.now() + 2 * DAY);
+  // 两边都出错：503，什么都不存
+  mode.netease = 'down';
+  await hook({ channel_post: audioPost(35, { title: '第三首', performer: '无名', duration: 100, file_id: 'X35', file_size: 9 }) });
+  let r = await req('/l/35');
+  assert.equal(r.status, 503);
+  assert.equal(r.headers.get('Retry-After'), '60');
+  await textOf(r);
+  assert.equal(await lib.getLyrics(35), null);
+  // 存着旧结果的歌到期再找，又碰上两边都出错：照旧给存着的
+  await lib.putLyrics(34, 'none', '', Date.now() - 1);
+  r = await req('/l/34');
+  assert.equal(r.status, 200);
+  await textOf(r);
+  mode.lrclib = mode.netease = 'ok';
+  assert.equal((await req('/l/999')).status, 404);
+});
+
+await t('歌词：频道里回复某首歌发 .lrc（UTF-8、GBK、UTF-16 都认）就配上，自动找到的盖不掉它', async () => {
+  const gbk = Uint8Array.from([...Buffer.from('[00:01.00]'), 0xc4, 0xe3, 0xba, 0xc3, 0x0a, ...Buffer.from('[00:03.00]'), 0xd4, 0xd9, 0xbc, 0xfb]); // 你好、再见
+  await hook({ channel_post: { message_id: 40, chat, document: { file_name: '随便起的名.lrc', mime_type: 'application/octet-stream', file_id: addFile(gbk), file_unique_id: 'L40', file_size: gbk.length }, reply_to_message: { message_id: 30, chat } } });
+  assert.deepEqual(await jsonOf(await req('/l/30')), { src: 'manual', synced: true, lines: [[1, '你好'], [3, '再见']] });
+  assert.equal((await lib.putLyrics(30, 'lrclib', lrcOf(['a', 'b', 'c', 'd', 'e']), 0)).src, 'manual', '自动结果盖不掉手动的');
+  assert.ok(!(await publicTracks()).some(x => x.id === 40), '.lrc 帖子不算歌');
+
+  // 没回复哪首：文件名「歌手 - 歌名.lrc」对上唯一一首。顺带：[offset]、一行多个时间、逐字时间、CRLF、[ti:] 标签
+  const utf8 = new TextEncoder().encode('[ti:晴天]\r\n[offset:+500]\r\n[00:10.00][00:40.00]副歌\r\n[00:05.00]<00:05.00>第<00:05.40>一<00:05.80>句\r\n');
+  await hook({ channel_post: { message_id: 41, chat, document: { file_name: '周杰伦 - 晴天.lrc', file_id: addFile(utf8), file_unique_id: 'L41', file_size: utf8.length } } });
+  assert.deepEqual(await jsonOf(await req('/l/32')), { src: 'manual', synced: true, lines: [[4.5, '第一句'], [9.5, '副歌'], [39.5, '副歌']] });
+
+  // 文件名谁也对不上、文件太大：不下载、不理
+  calls.length = 0;
+  assert.equal((await hook({ channel_post: { message_id: 42, chat, document: { file_name: '谁也不是.lrc', file_id: addFile(utf8), file_size: utf8.length } } })).status, 200);
+  assert.equal((await hook({ channel_post: { message_id: 43, chat, document: { file_name: 'big.lrc', file_id: 'HUGE', file_size: 999999 }, reply_to_message: { message_id: 31, chat } } })).status, 200);
+  assert.equal(calls.length, 0);
+  assert.equal((await jsonOf(await req('/l/31'))).src, 'netease');
+
+  // Windows 记事本存的 UTF-16（带 BOM），没有时间轴的纯文字也行
+  const u16 = new Uint8Array(Buffer.from('\ufeff第一句\n第二句', 'utf16le'));
+  await hook({ channel_post: { message_id: 44, chat, document: { file_name: 'x.lrc', file_id: addFile(u16), file_size: u16.length }, reply_to_message: { message_id: 31, chat } } });
+  assert.deepEqual(await jsonOf(await req('/l/31')), { src: 'manual', synced: false, lines: [[null, '第一句'], [null, '第二句']] });
+  // Telegram 出错也回 200（不让它反复重发）
+  mode.getFile = 'fail';
+  assert.equal((await hook({ channel_post: { message_id: 45, chat, document: { file_name: 'y.lrc', file_id: addFile(utf8), file_size: utf8.length }, reply_to_message: { message_id: 33, chat } } })).status, 200);
+  mode.getFile = 'ok';
+});
+
+await t('歌词：帖子换了文件就作废；删歌时一起删', async () => {
+  await hook({ edited_channel_post: audioPost(33, { title: '没人唱过的歌', performer: '无名', duration: 100, file_id: 'X33b', file_unique_id: 'U33-new', file_size: 9 }) });
+  assert.equal(await lib.getLyrics(33), null);
+  await admin('remove', { track: 30 });
+  assert.equal(await lib.getLyrics(30), null);
+  for (const id of [31, 32, 33, 34, 35]) await admin('remove', { track: id });
+});
+
+await t('查重：新帖和已有的歌名、歌手一样、时长差 3 秒以内就不登记；别的版本、编辑旧帖照常', async () => {
+  await hook({ channel_post: audioPost(50, { title: '海阔天空', performer: 'Beyond', duration: 326, file_id: 'X50', file_size: 9 }) });
+  await hook({ channel_post: audioPost(51, { title: '海阔天空', performer: 'Beyond @yinyue555', duration: 328, file_id: 'X51', file_size: 9 }) });
+  await hook({ channel_post: audioPost(52, { title: 'Beyond - 海阔天空', performer: '', duration: 325, file_id: 'X52', file_size: 9 }) });
+  await hook({ channel_post: audioPost(53, { title: '海阔天空', performer: 'Beyond', duration: 400, file_id: 'X53', file_size: 9 }) }); // 另一个版本
+  await hook({ channel_post: audioPost(54, { title: '海阔天空', performer: '别人', duration: 326, file_id: 'X54', file_size: 9 }) }); // 翻唱
+  let ids = (await publicTracks()).map(x => x.id);
+  assert.ok(ids.includes(50) && !ids.includes(51) && !ids.includes(52) && ids.includes(53) && ids.includes(54));
+  await hook({ edited_channel_post: audioPost(50, { title: '海阔天空', performer: 'Beyond', duration: 326, file_id: 'X50', file_size: 9 }) });
+  assert.ok((await publicTracks()).some(x => x.id === 50), '编辑已登记的帖子不会把自己当重复');
+  for (const id of [50, 53, 54]) await admin('remove', { track: id });
+});
+
+await t('封面：同一张图被 8 首歌当封面就是别的频道的台标，这些歌都改用频道图片，以后也不再用这张', async () => {
+  const logo = JSON.stringify([...JPEG(33)]);
+  const logoPost = id => audioPost(id, { file_id: 'L' + id, file_size: 9, thumbnail: { file_id: addFile(Uint8Array.from(JSON.parse(logo))) } });
+  const isLogo = async id => Buffer.from(await bytes(await req('/c/' + id))).equals(Buffer.from(JSON.parse(logo)));
+  for (let id = 600; id < 607; id++) {
+    await hook({ channel_post: logoPost(id) });
+    assert.ok(await isLogo(id), '前 7 首还当它是封面');
+  }
+  await hook({ channel_post: logoPost(607) });
+  assert.ok(!(await isLogo(607)), '第 8 首认出是台标');
+  for (let id = 600; id < 607; id++) assert.ok(!(await isLogo(id)), '之前的 7 首也换掉');
+  await hook({ channel_post: logoPost(608) });
+  assert.ok(!(await isLogo(608)), '记住了，以后也不用');
+  for (let id = 600; id <= 608; id++) await admin('remove', { track: id });
+
+  // 只有一两首用的台标认不出来：管理员可以手动说「这张封面不要了」
+  const odd = [...JPEG(44)];
+  for (const id of [610, 611]) await hook({ channel_post: audioPost(id, { file_id: 'M' + id, file_size: 9, thumbnail: { file_id: addFile(Uint8Array.from(odd)) } }) });
+  const isOdd = async id => Buffer.from(await bytes(await req('/c/' + id))).equals(Buffer.from(odd));
+  assert.ok((await isOdd(610)) && (await isOdd(611)));
+  assert.equal((await jsonOf(await admin('ban-cover', { track: 610 }))).affected, 2);
+  assert.ok(!(await isOdd(610)) && !(await isOdd(611)));
+  assert.equal((await admin('ban-cover', { track: 'x' })).status, 400);
+  for (const id of [610, 611]) await admin('remove', { track: id });
+});
+
+await t('歌单：管理员整体设置，跟着歌单 JSON 给出去；改名、排序保留 id，没列出的删掉；参数不对 400', async () => {
+  assert.deepEqual((await jsonOf(await req('/api/tracks'))).playlists, []);
+  assert.equal((await admin('playlists', { playlists: [{ name: '', tracks: [] }] })).status, 400);
+  assert.equal((await admin('playlists', { playlists: [{ name: 'x', tracks: ['a'] }] })).status, 400);
+  assert.equal((await admin('playlists', { playlists: [{ name: 'x', tracks: [] }] }, 'wrong')).status, 401);
+  let r = await jsonOf(await admin('playlists', { playlists: [{ name: ' 抖音热歌 ', tracks: [9, 10, 9] }, { name: '经典老歌', cover: 4, tracks: [4] }] }));
+  const [hot, old] = r.playlists;
+  assert.deepEqual([hot.name, hot.tracks, old.cover], ['抖音热歌', [9, 10], 4]);
+  assert.deepEqual((await jsonOf(await req('/api/tracks'))).playlists.map(p => p.name), ['抖音热歌', '经典老歌']);
+  r = await jsonOf(await admin('playlists', { playlists: [{ id: old.id, name: '经典', tracks: [4, 9] }, { name: '新的', tracks: [] }] }));
+  assert.deepEqual(r.playlists.map(p => [p.id === old.id, p.name, p.tracks]), [[true, '经典', [4, 9]], [false, '新的', []]]);
+  assert.ok(!r.playlists.some(p => p.id === hot.id), '没列出的歌单删掉');
+  assert.deepEqual((await jsonOf(await admin('state'))).playlists.map(p => p.name), ['经典', '新的']);
+  await admin('playlists', { playlists: [] });
+});
+
+await t('新歌自动分歌单：按歌名关键词和歌手放进对应歌单；MV 不进；编辑旧帖不重新分；只放进已有的歌单', async () => {
+  const names = ['抖音热歌', '华语流行', '伤感情歌', '经典老歌', '粤语金曲', 'DJ 劲爆', '重低音', '现场 Live'];
+  await admin('playlists', { playlists: names.map(name => ({ name, tracks: name === '经典老歌' ? [1] : [] })) });
+  const post = (id, title, performer) => hook({ channel_post: audioPost(id, { file_id: addFile(bytesOf(10, id)), file_size: 10, title, performer }) });
+  await post(901, '吻别 (DJ版)', '张学友');
+  await post(902, '晴天', '周杰伦');
+  await post(903, '某某 MV', '张学友');
+  await post(904, '超重低音车载串烧', '');
+  await post(905, '无名小曲', '某个新人');
+  await post(906, '想你的夜 (Live)', '关喆');
+  await post(907, '闽A轩少专属Vol.3', '');
+  const pl = Object.fromEntries((await lib.listPlaylists()).map(p => [p.name, p.tracks]));
+  assert.deepEqual(pl['DJ 劲爆'], [907, 904, 901]);
+  assert.deepEqual(pl['经典老歌'], [901, 1], '放在最前面，原来的不动');
+  assert.deepEqual(pl['粤语金曲'], [901]);
+  assert.deepEqual(pl['华语流行'], [905, 902], '对不上关键词、有歌手名的进华语流行');
+  assert.deepEqual(pl['重低音'], [904]);
+  assert.deepEqual(pl['现场 Live'], [906]);
+  assert.deepEqual(pl['伤感情歌'], [906]);
+  assert.ok(!Object.values(pl).some(t => t.includes(903)), 'MV 不进歌单');
+  // 编辑已登记的帖子：不再动歌单（管理员可能已经手动调过）
+  await lib.removeFromPlaylist(902, '华语流行');
+  await hook({ edited_channel_post: audioPost(902, { file_id: addFile(bytesOf(10, 902)), file_size: 10, title: '晴天', performer: '周杰伦' }) });
+  assert.ok(!(await lib.listPlaylists()).find(p => p.name === '华语流行').tracks.includes(902));
+  for (const id of [901, 902, 903, 904, 905, 906, 907]) await admin('remove', { track: id });
+  await admin('playlists', { playlists: [] });
+});
+
+await t('重新配图：只清掉用频道图片的歌（语音、确定没有自带缩略图的、和别首共用一张图的老歌），自带封面的不动', async () => {
+  await lib.upsertTrack({ id: 620, kind: 'audio', file_id: 'a', file_unique_id: 'u620', thumb: '', title: '没封面', performer: '', name: 'a.mp3', mime: 'audio/mpeg', size: 9, duration: 1, date: 1, caption: '' });
+  await lib.upsertTrack({ id: 621, kind: 'audio', file_id: 'b', file_unique_id: 'u621', thumb: 'T', title: '有封面', performer: '', name: 'b.mp3', mime: 'audio/mpeg', size: 9, duration: 1, date: 1, caption: '' });
+  await lib.upsertTrack({ id: 622, kind: 'audio', file_id: 'c', file_unique_id: 'u622', title: '老歌共用图', performer: '', name: 'c.mp3', mime: 'audio/mpeg', size: 9, duration: 1, date: 1, caption: '' });
+  await lib.upsertTrack({ id: 623, kind: 'audio', file_id: 'd', file_unique_id: 'u623', title: '老歌自己的图', performer: '', name: 'd.mp3', mime: 'audio/mpeg', size: 9, duration: 1, date: 1, caption: '' });
+  await lib.putCover(620, 'image/jpeg', 'PHOTO');
+  await lib.putCover(621, 'image/jpeg', 'OWN');
+  await lib.putCover(622, 'image/jpeg', 'PHOTO');
+  await lib.putCover(623, 'image/jpeg', 'OWN2');
+  const r = await jsonOf(await admin('reshuffle-photo-covers', {}));
+  assert.ok(r.cleared >= 2); // 前面测试留下的、用频道图片的歌也会一起清掉
+  assert.equal(await lib.getCover(620), null);
+  assert.equal(await lib.getCover(622), null);
+  assert.equal((await lib.getCover(621)).b64, 'OWN');
+  assert.equal((await lib.getCover(623)).b64, 'OWN2');
+  for (const id of [620, 621, 622, 623]) await admin('remove', { track: id });
+});
+
+await t('音乐来源频道名单：管理员读写，去掉 @ 和重复，名字不对 400', async () => {
+  assert.deepEqual((await jsonOf(await admin('sources'))).sources, []);
+  assert.equal((await admin('sources', { sources: ['ok_name', 'x'] })).status, 400);
+  const r = await jsonOf(await admin('sources', { sources: ['@VmoMusic', 'dj225', 'VmoMusic'] }));
+  assert.deepEqual(r.sources, ['VmoMusic', 'dj225']);
+  assert.deepEqual((await jsonOf(await admin('sources'))).sources, ['VmoMusic', 'dj225']);
+  assert.equal((await admin('sources', { sources: [] }, 'wrong')).status, 401);
+  await admin('sources', { sources: [] });
+});
+
+await t('大文件：Range 原样转给流式服务（带密钥），返回的字节和原文件一致', async () => {
+  const src = bigFiles.get(12);
+  const N = src.length;
+  calls.length = 0;
+  let r = await req('/a/12', { headers: { Range: 'bytes=0-1' } });
+  assert.equal(r.status, 206);
+  assert.equal(r.headers.get('Content-Range'), `bytes 0-1/${N}`);
+  assert.equal(r.headers.get('Content-Type'), 'audio/mpeg');
+  same(await bytes(r), src, 0, 2);
+  assert.deepEqual(calls.map(c => [c.url, c.range, c.key]), [[STREAMER + '/stream/12', 'bytes=0-1', SKEY]]);
+  assert.ok(!calls.some(c => c.url.includes('api.telegram.org')), '大文件不走 Bot API');
+
+  r = await req('/a/12', { headers: { Range: `bytes=${N - 1000}-` } });
+  assert.equal(r.headers.get('Content-Range'), `bytes ${N - 1000}-${N - 1}/${N}`);
+  same(await bytes(r), src, N - 1000, N);
+
+  r = await req('/a/12', { headers: { Range: 'bytes=-5' } });
+  assert.equal(calls.at(-1).range, `bytes=${N - 5}-${N - 1}`); // 转发的是算好的绝对范围
+  same(await bytes(r), src, N - 5, N);
+
+  calls.length = 0;
+  r = await req('/a/12?dl=1'); // 整个下载：不带 Range，200
+  assert.equal(r.status, 200);
+  assert.equal(calls[0].range, null);
+  assert.equal(r.headers.get('Content-Length'), String(N));
+  assert.match(r.headers.get('Content-Disposition'), /^attachment;/);
+  same(await bytes(r), src, 0, N);
+
+  r = await req('/a/12', { headers: { Range: `bytes=${N}-` } });
+  assert.equal(r.status, 416);
+  assert.equal(r.headers.get('Content-Range'), `bytes */${N}`);
+  r = await req('/a/12', { method: 'HEAD' });
+  assert.equal(r.headers.get('Content-Length'), String(N));
+});
+
+await t('流式服务在休眠：连不上、回「正在启动」网页、回 502 都算正在唤醒（503 + Retry-After）', async () => {
+  for (const m of ['down', 'starting', '502']) {
+    mode.streamer = m;
+    const r = await req('/a/12', { headers: { Range: 'bytes=0-1' } });
+    assert.equal(r.status, 503, m);
+    assert.equal(r.headers.get('Retry-After'), '15');
+    assert.match(await textOf(r), /唤醒/);
+  }
+  mode.streamer = 'short'; // 给的字节数不对：不能当音频转出去
+  let r = await req('/a/12', { headers: { Range: 'bytes=0-99' } });
+  assert.equal(r.status, 502);
+  await textOf(r);
+  mode.streamer = 'ok';
+  bigFiles.delete(12); // 频道里的帖子被删了
+  r = await req('/a/12', { headers: { Range: 'bytes=0-1' } });
+  assert.equal(r.status, 404);
+  assert.match(await textOf(r), /找不到/);
+  bigFiles.set(12, bytesOf(25 * MB, 12));
+});
+
+await t('没配流式服务：大文件标成不能播放，请求返回 503 说明原因；小文件不受影响', async () => {
+  const saved = env.STREAMER_URL;
+  env.STREAMER_URL = '';
+  await hook({ channel_post: audioPost(20, { file_id: 'BIG20', file_size: 21 * MB }) }); // 顺便清掉歌单缓存
+  const list = await publicTracks();
+  assert.equal(find(list, 20).playable, false);
+  assert.equal(find(list, 12).playable, false);
+  assert.equal(find(list, 9).playable, true);
+  const r = await req('/a/12');
+  assert.equal(r.status, 503);
+  assert.equal(r.headers.get('Retry-After'), null);
+  assert.match(await textOf(r), /暂时不能/);
+  const s = await jsonOf(await admin('state'));
+  assert.equal(s.streamer, false);
+  env.STREAMER_URL = saved;
+  await hook({ channel_post: audioPost(20, { file_id: 'BIG20', file_size: 21 * MB }) });
+  assert.equal(find(await publicTracks(), 20).playable, true);
+});
+
+await t('小文件：Range 透传；下载路径过期重取；Telegram 故障 502；多段 Range 给整个文件', async () => {
+  const f9 = files.get((await lib.getTrack(9)).file_id);
+  let r = await req('/a/9', { headers: { Range: 'bytes=10-109' } });
+  assert.equal(r.status, 206);
+  assert.equal(r.headers.get('Content-Range'), 'bytes 10-109/5000');
+  same(await bytes(r), f9, 10, 110);
+  calls.length = 0;
+  mode.expireOnce = true;
+  r = await req('/a/9', { headers: { Range: 'bytes=0-9' } });
+  assert.equal(r.status, 206);
+  await bytes(r);
+  assert.equal(calls.filter(c => c.url.includes('/getFile')).length, 1);
+  assert.equal(calls.filter(c => c.url.includes('/file/bot')).length, 2);
+  r = await req('/a/9', { headers: { Range: 'bytes=0-1,5-6' } });
+  assert.equal(r.status, 200);
+  same(await bytes(r), f9, 0, 5000);
+  mode.getFile = 'fail';
+  r = await req('/a/11');
+  mode.getFile = 'ok';
+  assert.equal(r.status, 502);
+  await textOf(r);
+  r = await req('/a/10?dl=1');
+  assert.match(r.headers.get('Content-Disposition'), /^attachment; filename="track-10\.m4a"; filename\*=UTF-8''%E6%88%91%E5%A4%AA%E7%AC%A8\.m4a$/);
+  await bytes(r);
+});
+
+await t('编辑成纯文字 → 移除；管理页也能移除；管理接口要密钥且不带 CORS 头', async () => {
+  await hook({ edited_channel_post: { message_id: 13, chat, text: '不是音频了' } });
+  assert.equal((await admin('state', undefined, 'wrong')).status, 401);
+  assert.equal((await req('/admin/api/state')).status, 401);
+  const r = await admin('state');
+  assert.equal(r.headers.get('Access-Control-Allow-Origin'), null);
+  const s = await jsonOf(r);
+  assert.equal(s.streamer, true);
+  assert.equal(find(s.tracks, 12).big, true);
+  assert.equal((await admin('remove', { track: 'x' })).status, 400);
+  assert.equal((await admin('remove', { track: 4 })).status, 200);
+  const ids = (await publicTracks()).map(x => x.id);
+  assert.ok(!ids.includes(13) && !ids.includes(4));
+  assert.equal((await req('/a/4')).status, 404);
+});
+
+await t('音柱数据：第一次请流式服务算，存下来；算不了记住；服务没起来不记；换了文件要重算', async () => {
+  for (const id of [810, 811, 404]) await hook({ channel_post: audioPost(id, { file_id: addFile(bytesOf(10, id)), file_size: 10 }) });
+  calls.length = 0;
+  let r = await req('/v/810');
+  assert.equal(r.status, 200);
+  assert.deepEqual([...await bytes(r)], [0x58, 0x56, 1, 15, 2, 0x12, 0xf0, 810 & 255]);
+  r = await req('/v/810');
+  await bytes(r);
+  assert.equal(calls.filter(c => c.url.includes('/viz/')).length, 1, '算过的直接给');
+  r = await req('/v/404');
+  assert.equal(r.status, 404);
+  await bytes(r);
+  calls.length = 0;
+  assert.equal((await req('/v/404')).status, 404);
+  assert.equal(calls.length, 0, '算不了的记住，不再问');
+  mode.viz = 'starting';
+  r = await req('/v/811');
+  assert.equal(r.status, 503);
+  await bytes(r);
+  mode.viz = 'down';
+  assert.equal((await req('/v/811')).status, 503);
+  mode.viz = 'ok';
+  assert.equal((await req('/v/811')).status, 200, '服务好了再算');
+  assert.equal((await req('/v/9999')).status, 404, '没有这首歌');
+  // 帖子换了文件：旧数据作废
+  await hook({ edited_channel_post: audioPost(810, { file_id: addFile(bytesOf(12, 1)), file_size: 12, file_unique_id: 'U810b' }) });
+  assert.equal(await lib.getViz(810), null);
+  await admin('remove', { track: 811 });
+  assert.equal(await lib.getViz(811), null);
+  for (const id of [810, 404]) await admin('remove', { track: id });
+});
+
+// 私聊机器人：from 是谁，发什么
+const dm = (from, text) => hook({ update_id: 1, message: { message_id: 1, from: { id: from }, chat: { id: from, type: 'private' }, text } });
+const press = (from, data) => hook({ update_id: 2, callback_query: { id: 'cb', from: { id: from }, message: { message_id: 9, chat: { id: from, type: 'private' } }, data } });
+const lastSay = () => bot.out.filter(o => o.method === 'sendMessage').at(-1);
+
+await t('机器人：频道主是频道创建者（问一次就记住）；频道主和听众看到不同的说明；群里的消息不理', async () => {
+  bot.out.length = 0;
+  await dm(OWNER, '/start');
+  assert.match(lastSay().text, /管理助手/);
+  await dm(FAN, '/start');
+  assert.match(lastSay().text, /发一个歌名给我/);
+  assert.equal(bot.adminAsks, 1, '频道主记住了，不重复问');
+  const n = bot.out.length;
+  await hook({ update_id: 3, message: { message_id: 2, from: { id: FAN }, chat: { id: -5, type: 'group' }, text: '晴天' } });
+  assert.equal(bot.out.length, n);
+});
+
+await t('求歌：库里有直接给链接；没有就请流式服务去找（带来源频道和链接前缀）；每人每天限 10 次；服务睡着时说一声', async () => {
+  await admin('sources', { sources: ['VmoMusic', 'yinyue555'] });
+  await hook({ channel_post: audioPost(970, { file_id: addFile(bytesOf(10, 970)), file_size: 10, title: '谁', performer: '张万森' }) });
+  await dm(FAN, '谁');
+  assert.match(lastSay().text, /小橘音乐里有：张万森 - 谁/);
+  assert.ok(lastSay().text.includes(BASE + '/#970'));
+  bot.toStreamer.length = 0;
+  await dm(FAN, '晴天');
+  assert.match(lastSay().text, /我去找找/);
+  const f = bot.toStreamer.find(x => x.path === 'fulfill').body;
+  assert.equal(f.q, '晴天');
+  assert.equal(f.chat_id, FAN);
+  assert.deepEqual(f.only, ['VmoMusic', 'yinyue555']);
+  assert.equal(f.link, BASE + '/');
+  assert.ok(f.existing.some(([t, a]) => t === '谁' && a === '张万森'));
+  for (let i = 0; i < 9; i++) await dm(FAN, '晴天' + i);
+  await dm(FAN, '稻香');
+  assert.match(lastSay().text, /有点多/);
+  await dm(OWNER, '稻香'); // 频道主不限次
+  assert.match(lastSay().text, /我去找找/);
+  bot.streamerDown = true;
+  await dm(OWNER, '七里香');
+  assert.match(lastSay().text, /睡觉/);
+  bot.streamerDown = false;
+  await dm(FAN, 'x'.repeat(70));
+  assert.match(lastSay().text, /太长/);
+  await admin('remove', { track: 970 });
+});
+
+await t('频道主：搜 → 列出来带「搬」按钮；按按钮请流式服务搬；别人按没用', async () => {
+  bot.search = [{ channel: 'VmoMusic', id: 321, title: '晴天', performer: '周杰伦', duration: 269 }, { channel: 'VmoMusic', id: 322, title: '晴天片段', performer: '', duration: 20 }];
+  await dm(OWNER, '搜 晴天');
+  const m = lastSay();
+  assert.match(m.text, /1\. 周杰伦 - 晴天（4:29，@VmoMusic）/);
+  assert.ok(!m.text.includes('片段'), '太短的片段不列');
+  assert.deepEqual(m.reply_markup.inline_keyboard, [[{ text: '搬 1', callback_data: 'p:VmoMusic:321' }]]);
+  assert.ok(bot.toStreamer.at(-1).query.includes('only=VmoMusic%2Cyinyue555'));
+  bot.pickId = 4321;
+  await press(OWNER, 'p:VmoMusic:321');
+  assert.deepEqual(bot.toStreamer.at(-1), { path: 'copy/pick', body: { items: [{ channel: 'VmoMusic', id: 321 }] }, query: '' });
+  assert.ok(lastSay().text.includes(BASE + '/#4321'));
+  bot.pickId = 0;
+  await press(OWNER, 'p:VmoMusic:999');
+  assert.match(lastSay().text, /搬不了/);
+  const n = bot.toStreamer.length;
+  await press(FAN, 'p:VmoMusic:321');
+  assert.equal(bot.toStreamer.length, n);
+  assert.equal(bot.out.at(-1).text, '只有频道主能用');
+});
+
+await t('频道主：搬 @频道 N → 请流式服务搬（中文、查重、搬完通知频道主）；正在搬别的时说一声', async () => {
+  await dm(OWNER, '搬 @haoyyup 120');
+  const b = bot.toStreamer.at(-1).body;
+  assert.deepEqual([b.source, b.limit, b.notify, b.chinese_only, b.min_seconds, b.max_seconds], ['haoyyup', 120, OWNER, true, 60, 1200]);
+  assert.match(lastSay().text, /开始从 @haoyyup 搬最多 120 首/);
+  bot.copyBusy = true;
+  await dm(OWNER, '搬 yinyue555');
+  assert.match(lastSay().text, /正在搬别的/);
+  bot.copyBusy = false;
+  await dm(FAN + 1, '搬 @haoyyup 120'); // 听众发这个只当求歌（换一个还没用完次数的听众）
+  assert.equal(bot.toStreamer.at(-1).path, 'fulfill');
+});
+
+await t('频道主：找 → 加入/移出歌单、删除（要确认）；统计', async () => {
+  await admin('playlists', { playlists: [{ name: '抖音热歌', tracks: [] }, { name: '华语流行', tracks: [] }] });
+  await hook({ channel_post: audioPost(960, { file_id: addFile(bytesOf(10, 960)), file_size: 10, title: '测试小曲', performer: '小橘' }) });
+  const pls = await lib.listPlaylists();
+  const hot = pls.find(p => p.name === '抖音热歌'), pop = pls.find(p => p.name === '华语流行');
+  assert.ok(pop.tracks.includes(960), '新歌自动进了华语流行');
+  await dm(OWNER, '找 测试小曲');
+  assert.match(lastSay().text, /小橘 - 测试小曲\n在歌单：华语流行/);
+  await press(OWNER, 'a:960');
+  assert.deepEqual(lastSay().reply_markup.inline_keyboard, [[{ text: '抖音热歌', callback_data: `ap:960:${hot.id}` }]]);
+  await press(OWNER, `ap:960:${hot.id}`);
+  assert.ok((await lib.listPlaylists()).find(p => p.name === '抖音热歌').tracks.includes(960));
+  await press(OWNER, `rp:960:${pop.id}`);
+  assert.ok(!(await lib.listPlaylists()).find(p => p.name === '华语流行').tracks.includes(960));
+  await dm(OWNER, '统计');
+  assert.match(lastSay().text, /歌库一共 \d+ 首/);
+  assert.match(lastSay().text, /抖音热歌 1 首/);
+  await press(OWNER, 'd:960');
+  assert.match(lastSay().text, /确定从小橘音乐删除/);
+  assert.ok(await lib.getTrack(960), '没确认前不删');
+  await press(OWNER, 'dd:960');
+  assert.equal(await lib.getTrack(960), null);
+  await dm(OWNER, '找 不存在的歌');
+  assert.match(lastSay().text, /没有「不存在的歌」/);
+  await admin('playlists', { playlists: [] });
+});
+
+await t('贴网址搬运：搬运设置可以开关网站和授权、改数量和歌单；网址连同设置交给流式服务；搬来的歌进指定歌单', async () => {
+  await admin('playlists', { playlists: [{ name: '华语流行', tracks: [] }] });
+  await dm(OWNER, '搬运设置');
+  let panel = lastSay();
+  assert.match(panel.text, /每次最多搬：20 首/);
+  const keys = panel.reply_markup.inline_keyboard.flat().map(b => b.text);
+  assert.ok(keys.includes('✅ 互联网档案馆') && keys.includes('✅ CC BY-NC-ND'));
+  await press(OWNER, 'hl:by-nd');
+  const edit = bot.out.filter(o => o.method === 'editMessageText').at(-1);
+  assert.ok(edit.reply_markup.inline_keyboard.flat().some(b => b.text === '⬜️ CC BY-ND'));
+  await press(OWNER, 'hs:commons');
+  await press(FAN, 'hl:by'); // 别人按没用
+  await dm(OWNER, '搬运数量 30');
+  await dm(OWNER, '搬运歌单 纯音乐');
+  assert.match(lastSay().text, /新建了这个歌单/);
+  assert.deepEqual((await lib.listPlaylists()).map(p => p.name), ['华语流行', '纯音乐']);
+  await dm(OWNER, 'https://archive.org/details/tpdm087');
+  const h = bot.toStreamer.at(-1);
+  assert.equal(h.path, 'harvest');
+  assert.equal(h.body.url, 'https://archive.org/details/tpdm087');
+  assert.deepEqual(h.body.settings.sites, ['archive']);
+  assert.ok(!h.body.settings.licenses.includes('by-nd') && h.body.settings.licenses.includes('by'));
+  assert.equal(h.body.settings.limit, 30);
+  assert.equal(h.body.notify, OWNER);
+  assert.match(lastSay().text, /开始从互联网档案馆 archive.org搬，最多 30 首/);
+  await dm(OWNER, 'https://archive.org/details/x 5');
+  assert.equal(bot.toStreamer.at(-1).body.settings.limit, 5, '网址后面的数量只管这一次');
+  await dm(OWNER, 'https://music.example.com/song/1');
+  assert.match(lastSay().text, /这个网站还不支持。现在支持：互联网档案馆、维基共享资源/);
+  // 搬来的帖子（说明里有授权、来源）进「纯音乐」，不按类型分
+  const caption = 'Gymnopedie No. 1 — Kevin MacLeod\n授权：CC BY 署名\n来源：https://commons.wikimedia.org/wiki/File:x\n原作者以上述授权公开发布，转载请保留署名和来源。';
+  await hook({ channel_post: { ...audioPost(980, { file_id: addFile(bytesOf(10, 980)), file_size: 10, title: 'Gymnopedie No. 1', performer: 'Kevin MacLeod' }), caption } });
+  let pl = Object.fromEntries((await lib.listPlaylists()).map(p => [p.name, p.tracks]));
+  assert.deepEqual([pl['纯音乐'], pl['华语流行']], [[980], []]);
+  await dm(OWNER, '搬运歌单 自动');
+  await hook({ channel_post: { ...audioPost(981, { file_id: addFile(bytesOf(10, 981)), file_size: 10, title: 'Piano', performer: 'Someone' }), caption } });
+  pl = Object.fromEntries((await lib.listPlaylists()).map(p => [p.name, p.tracks]));
+  assert.deepEqual(pl['华语流行'], [], '改回自动后按类型分；分不出类型的搬来的歌不硬塞华语流行');
+  await hook({ channel_post: { ...audioPost(982, { file_id: addFile(bytesOf(10, 982)), file_size: 10, title: 'Night Drive (DJ Remix)', performer: 'Someone' }), caption } });
+  pl = Object.fromEntries((await lib.listPlaylists()).map(p => [p.name, p.tracks]));
+  assert.ok(!pl['华语流行'].includes(982));
+  const st = await lib.getHarvest();
+  assert.deepEqual([st.sites, st.limit, st.playlist], [['archive'], 30, '']);
+  for (const id of [980, 981, 982]) await admin('remove', { track: id });
+  await admin('playlists', { playlists: [] });
+});
+
+await t('夜里自动搬：叫醒流式服务，带上每个频道上次看到哪条；上一晚搬完的记录合进来；还在搬就不再开', async () => {
+  await admin('sources', { sources: ['VmoMusic', 'yinyue555'] });
+  bot.autoStatus = { status: 'idle' };
+  let r = await jsonOf(await admin('auto-run', {}));
+  assert.equal(r.ok, true);
+  let b = bot.toStreamer.at(-1);
+  assert.equal(b.path, 'auto/start');
+  assert.deepEqual(b.body.sources, { VmoMusic: 0, yinyue555: 0 });
+  assert.equal(b.body.notify, OWNER);
+  // 第二晚：上一晚搬完了，记下每个频道看到的最大消息号
+  bot.autoStatus = { status: 'done', run_id: r.runId, copied: 7, sources: { VmoMusic: { max_id: 900, copied: 5 }, yinyue555: { max_id: 50, copied: 2 } } };
+  await new Promise(res => setTimeout(res, 1100)); // 换一秒，run_id 才不一样
+  r = await jsonOf(await admin('auto-run', {}));
+  b = bot.toStreamer.at(-1);
+  assert.deepEqual(b.body.sources, { VmoMusic: 900, yinyue555: 50 });
+  const st = await jsonOf(await admin('auto-state'));
+  assert.equal(st.runId, r.runId);
+  bot.autoStatus = { status: 'running' };
+  const n = bot.toStreamer.length;
+  r = await jsonOf(await admin('auto-run', {}));
+  assert.deepEqual([r.ok, r.why], [false, 'still running']);
+  assert.equal(bot.toStreamer.at(-1).path, 'auto/status');
+  assert.equal(bot.toStreamer.length, n + 1);
+});
+
+await t('频道主的菜单：常驻按钮和 / 命令（只设给频道主），点了等于发对应的文字；听众看不到', async () => {
+  await lib.setConfig('cmdsVer', '');
+  await dm(OWNER, '/start');
+  const set = bot.out.filter(o => o.method === 'setMyCommands').at(-1);
+  assert.deepEqual(set.scope, { type: 'chat', chat_id: OWNER });
+  assert.ok(set.commands.some(c => c.command === 'stats'));
+  assert.ok(!set.commands.some(c => c.command === 'progress'), '菜单里没有抖音的命令');
+  const help = lastSay();
+  assert.match(help.text, /🎵 音乐/);
+  assert.doesNotMatch(help.text, /运行爬虫|搜抖音|审核/);
+  assert.deepEqual(help.reply_markup.keyboard[0], ['📈 统计', '🎵 搬运设置']);
+  const n = bot.out.filter(o => o.method === 'setMyCommands').length;
+  await dm(OWNER, '❓ 帮助');
+  assert.equal(bot.out.filter(o => o.method === 'setMyCommands').length, n, '设过一次就不再设');
+  assert.match(lastSay().text, /全部功能/);
+  await dm(OWNER, '📈 统计');
+  assert.match(lastSay().text, /歌库一共/);
+  await dm(OWNER, '/harvest@xiaoju_music_bot');
+  assert.match(lastSay().text, /搬运设置/);
+  await dm(FAN + 6, '/start');
+  assert.ok(!lastSay().reply_markup, '听众没有频道主的按钮');
+});
+
+await t('路由：404、405、CORS 预检', async () => {
+  assert.equal((await req('/a/999')).status, 404);
+  assert.equal((await req('/a/abc')).status, 404);
+  assert.equal((await req('/nope')).status, 404);
+  assert.equal((await req('/tg-webhook')).status, 405);
+  assert.equal((await req('/a/9', { method: 'POST' })).status, 405);
+  assert.equal((await admin('nope', {})).status, 404);
+  const r = await req('/a/9', { method: 'OPTIONS' });
+  assert.equal(r.status, 204);
+  assert.match(r.headers.get('Access-Control-Allow-Headers'), /Range/);
+});
+
+await t('播放页和管理页都能取到，内嵌脚本能通过语法检查', async () => {
+  for (const path of ['/', '/admin']) {
+    const r = await req(path);
+    assert.equal(r.headers.get('Content-Type'), 'text/html; charset=utf-8');
+    const html = await textOf(r);
+    new Function(html.split('<script>')[1].split('</script>')[0]); // 语法错误会抛
+  }
+  assert.equal((await req('/admin')).headers.get('X-Robots-Tag'), 'noindex');
+});
+
+await t('任何响应里都不出现机器人 token、管理密钥、流式服务密钥', async () => {
+  assert.ok(seen.length > 20);
+  for (const s of seen) {
+    for (const secret of [TOKEN, 'SECRET-BOT', ADMIN, SKEY]) assert.ok(!s.includes(secret), 'leaked: ' + s.slice(0, 200));
+  }
+});
+
+console.log(`\n全部 ${n} 项通过`);

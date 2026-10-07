@@ -1,0 +1,3 @@
+# 跑测试时 Python 生成的缓存
+__pycache__/
+.pytest_cache/

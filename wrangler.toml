@@ -1,0 +1,39 @@
+name = "xiaoju-music"
+main = "worker.js"
+compatibility_date = "2026-01-01"
+workers_dev = true
+
+# page.html / admin.html 以文本模块导入（worker.js 里 import PAGE from './page.html'）
+[[rules]]
+type = "Text"
+globs = ["**/*.html"]
+fallthrough = false
+
+[vars]
+CHANNEL_ID = "-1003817921075"
+CHANNEL_USERNAME = "xiaojumusic"
+# 大文件流式服务（streamer/，部署在 Hugging Face Space）的地址；留空则超过 20 MB 的歌不能播放
+STREAMER_URL = "https://langhua1998-douyin-proxy.hf.space"
+
+# 更早版本存歌单用的 KV：Durable Object 第一次启动时从这里迁移数据，之后不再读写
+[[kv_namespaces]]
+binding = "TRACKS"
+id = "738216f3f7d64f1ab143128406d1b35e"
+
+[[durable_objects.bindings]]
+name = "LIB"
+class_name = "Library"
+
+[[migrations]]
+tag = "v1"
+new_sqlite_classes = ["Library"]
+
+# 四个 secret 不写在这里（仓库是公开的），线上已设好；需要改时用：
+#   wrangler secret put TG_BOT_TOKEN
+#   wrangler secret put TG_WEBHOOK_SECRET
+#   wrangler secret put ADMIN_KEY
+#   wrangler secret put STREAMER_KEY
+
+# 每天北京时间凌晨 3 点（UTC 19:00）：自动去来源频道搬新歌
+[triggers]
+crons = ["0 19 * * *"]
