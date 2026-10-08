@@ -11,11 +11,11 @@
 ## 开工前先记住这 7 条
 
 1. **密钥绝不进仓库**，也不进日志、响应、提交信息、PR 描述（见 6.1）。
-2. **流式服务一重启，内存里的东西全丢**：审核单、正在跑的搬运、刚扫码还没被 Worker 取走的网易云登录。部署前先确认没有活在跑（见 6.3）。
-3. **定时任务的 cron 字符串四处必须一字不差**：`worker.js` 的 `FILL_CRON`、`wrangler.toml`、`.github/workflows/deploy-worker.yml`、`README.md`。对不上的话，补全任务会被当成「夜里自动搬」，每 5 分钟跑一次（见 6.4）。
+2. **流式服务一重启，内存里的东西全丢**：审核单、正在跑的搬运、刚扫码还没被 Worker 取走的网易云登录。部署前先确认没有活在跑（见 6.2）。
+3. **定时任务的 cron 字符串四处必须一字不差**：`worker.js` 的 `FILL_CRON`、`wrangler.toml`、`.github/workflows/deploy-worker.yml`、`README.md`。对不上的话，补全任务会被当成「夜里自动搬」，每 5 分钟跑一次（见 6.3）。
 4. **改完先跑两套本地测试，都过了才提交**：`node test.mjs` 和 `cd streamer && python -m pytest -q`（见第 3 节）。
 5. **会影响线上的事，频道主明确说了才做**：部署、推 Space、设 webhook、调线上管理接口、用机器人给真人发消息、往频道发帖。合进 `main` **不会**自动部署。
-6. **Durable Object 免费额度很紧**：每天最多读 500 万行，Worker 每次调用最多 50 个子请求。不要在每次请求、每次定时任务里扫全表（见 6.6）。
+6. **Durable Object 免费额度很紧**：每天最多读 500 万行，Worker 每次调用最多 50 个子请求。不要在每次请求、每次定时任务里扫全表（见 6.5）。
 7. **跨文件、跨服务的约定改一边就要改另一边**（见第 7 节），比如歌名、歌手的整理规则、帖子说明的格式、按钮数据的前缀。
 
 ---
@@ -273,7 +273,7 @@ curl -X PUT "https://api.cloudflare.com/client/v4/accounts/$ACC/workers/scripts/
 
 1. 改动先合进**本仓库的 `main`**。
 2. 到 `langhua98/xiaoju-video` 的 Actions 跑 **Deploy streamer**。它会把视频的 `streamer/` 和本仓库 `main` 上的 `streamer/app.py`、`streamer/harvest/` 一起推到 Space，Space 自动重新构建。
-3. **推之前先确认没有活在跑**：机器人里发「统计」，或者调流式服务的 `GET /harvest/status`、`GET /copy/status`，看有没有 `running`。重新构建会打断正在搬的歌、清掉审核单，视频那边正在转的作品也会断（见 6.3）。
+3. **推之前先确认没有活在跑**：机器人里发「统计」，或者调流式服务的 `GET /harvest/status`、`GET /copy/status`，看有没有 `running`。重新构建会打断正在搬的歌、清掉审核单，视频那边正在转的作品也会断（见 6.2）。
 4. Space 的 `Dockerfile`、`requirements.txt` 归**视频仓库**管。音乐要加新的 Python 依赖时，本仓库的 `streamer/requirements.txt` 和 xiaoju-video 的 `streamer/requirements.txt` **都要加**；后者在本仓库外，告诉频道主去改，或者在那边另开 PR。api-enhanced 的版本也固定在视频仓库的 `streamer/Dockerfile` 里。
 5. 本仓库的 `streamer/Dockerfile` 留着，等以后音乐有了自己的 Space 再用（那时环境变量不用带 `MUSIC_` 前缀）。
 
@@ -354,13 +354,7 @@ Worker 和流式服务没法同时上线，所以改动要**两边都向后兼�
 - 比较密钥用定长比较（Worker 的 `sameString()`、Python 的 `hmac.compare_digest`），不要换成 `===`。
 - 如果密钥已经泄露：告诉频道主，按 `README.md`「日常维护」换掉，不要只删掉那次提交（历史里还在）。
 
-### 6.2 不开 api-enhanced 的「解灰」
-
-- 不设 `ENABLE_GENERAL_UNBLOCK` 环境变量，请求里不带 `unblock=true`，也不加任何「从别的平台找同名歌顶替」的逻辑。
-- 原因：搬的必须是**我们自己传到网易云的那个文件**。解灰会拿别人的录音顶替，搬进频道的就成了别人的作品（版权问题，也不是我们的歌）。
-- 拿不到下载地址、或者只给试听片段时，就报原因、这首不发（`NetEase.download()` 现在就是这样），不要换别的来源硬凑。
-
-### 6.3 Space 一重启，内存里的东西就没了
+### 6.2 Space 一重启，内存里的东西就没了
 
 这些东西**只在流式服务的内存里**，重启、重新构建、休眠后被叫醒都会清空：
 
@@ -376,11 +370,11 @@ Worker 和流式服务没法同时上线，所以改动要**两边都向后兼�
 - 新功能要能接受「对面刚重启过」：Worker 收到 `missing`、`409`、HTML 错误页都要给频道主一句能看懂的话，不能报错了事。
 - Space 免费版闲置约 48 小时会休眠。播放大文件时 Worker 回 `503 + Retry-After`，播放页自动重试。这个流程别改坏。
 
-### 6.4 cron 字符串必须一致
+### 6.3 cron 字符串必须一致
 
 `scheduled()` 的写法是：`controller.cron === FILL_CRON` 就补封面歌词，**其他任何 cron 都当成夜里自动搬**。所以只要有一处 cron 和 `FILL_CRON` 不一样，`nightly()` 就会每 5 分钟跑一次：每次都去来源频道搬歌、同步小号。改频率时四处一起改（见 5.4），并让 `test.mjs` 里的 `tick('*/5 * * * *')` 跟着变。
 
-### 6.5 Telegram 会话的规矩
+### 6.4 Telegram 会话的规矩
 
 - 流式服务的 Telethon 客户端必须是 `receive_updates=False`（`make_client()` 和 `Login` 里都是）。机器人同时挂在 Bot API 的 webhook 上，Telegram 给同一个机器人的推送可能只送到其中一个会话；这边一订阅，频道新帖就可能被抢走，Worker 就漏登记新歌。
 - 不要改成自建的 `telegram-bot-api --local`，也不要对官方 Bot API 调 `logOut`（原因见 `streamer/README.md`）。
@@ -389,30 +383,30 @@ Worker 和流式服务没法同时上线，所以改动要**两边都向后兼�
 - 转发用 `drop_author=True`（不带「转发自」），这是现有行为，保持。
 - 遇到 `FloodWaitError` 照着等，或者停下来；不要换账号、开并发去硬抢。
 
-### 6.6 Durable Object 和 Worker 的额度
+### 6.5 Durable Object 和 Worker 的额度
 
 - DO 免费版每天最多读 500 万行。`listTracks()` 把整张歌表缓存在 DO 内存里；写了 `songs` 或 `covers` 之后**必须调 `this.changed()`** 让缓存作废。不要在每次请求、每次定时任务里 `SELECT * FROM songs` / 扫 `covers`。按图找封面走索引 `covers_data`。
 - 免费版 Worker 每次调用最多 50 个子请求，所以 `FILL_BATCH` 是 8、连着错 3 次就停。别把批量调大。
 - Worker isolate 里的缓存（`filePaths`、`recCache`、`listCache`）随时会丢，只能当加速用，不能存必须保留的东西。
 - 外部请求一律带 `AbortSignal.timeout(...)`；不用的响应体要 `res.body.cancel()`。
 
-### 6.7 数据库结构只加不删
+### 6.6 数据库结构只加不删
 
 - 建表、加列都写在 `Library` 构造函数的 `blockConcurrencyWhile` 里，必须**可以重复执行**：`CREATE TABLE IF NOT EXISTS`；加列先查 `PRAGMA table_info(表)` 再 `ALTER TABLE … ADD COLUMN`（参考 `covers.own`）。
 - 不删表、不删列、不清用户数据（歌单、手动配的歌词、收藏所依赖的消息号）。确实要做一次性数据修正时，用 config 里的版本标记（参考 `coversV`），并且写测试。
 - 不要改 `[[migrations]]` 里已有的 `v1`，也不要改类名 `Library`、绑定名 `LIB`、`idFromName('library')`：改了就等于换了一个空数据库。
 
-### 6.8 搬运的规矩
+### 6.7 搬运的规矩
 
 - 贴网址、爬关键词抓到的歌**必须先进审核单**，频道主点「审核通过」才发。只有频道主亲手加的「小号」主页可以不审核直接发。
 - 帖子说明的格式（`授权：…`、`来源：…`）是 Worker 识别「搬来的自己的歌」的依据，不能随便改（见第 7 节）。
 - 测试发帖用「搬运频道 @测试频道」，**不要拿正式频道试**。Worker 只登记正式频道的帖子。
 
-### 6.9 会影响线上的操作，要频道主明确同意
+### 6.8 会影响线上的操作，要频道主明确同意
 
 包括：部署 Worker、跑 Deploy streamer、改 Space 的变量、`setWebhook`、调线上 `/admin/api/*`（尤其 `remove`、`playlists`、`auto-run`）、调线上流式服务的任何接口、用机器人给真人发消息、往任何频道发帖、加入或归档频道。对方同意过一次，只算那一次。
 
-### 6.10 其他
+### 6.9 其他
 
 - 不要给 Worker 加 npm 依赖或构建步骤。它现在是一个能直接上传的 ES module，`package.json` 没有任何依赖。Worker 代码里不能用 Node 专有的 API（`fs`、`Buffer` 等），只能用 Workers 运行时的 Web API。
 - 页面不引外部脚本、CDN、字体，全部内联（`workers.dev` 在中国大陆本来就要 VPN，外部资源只会更慢、更容易挂）。
@@ -439,7 +433,7 @@ Worker 和流式服务没法同时上线，所以改动要**两边都向后兼�
 | 管理接口 | `worker.js` 的 `adminApi()` | `admin.html`（只用 `state`、`remove`）、`README.md` 的路由表 |
 | 频道主菜单 | `OWNER_COMMANDS`、`OWNER_KEYBOARD`、`OWNER_ALIAS` | 改了必须把 `COMMANDS_VERSION` 加 1，否则频道主那边的菜单不会重设 |
 | 机器人说明 | `HELP`、`PUBLIC_HELP` | 加命令、改用法时同步改 |
-| cron | `FILL_CRON` | `wrangler.toml`、`deploy-worker.yml`、`README.md`（见 6.4） |
+| cron | `FILL_CRON` | `wrangler.toml`、`deploy-worker.yml`、`README.md`（见 6.3） |
 | 部署参数（绑定、变量、`compatibility_date`） | `wrangler.toml` | `deploy-worker.yml`、`README.md` 的 curl |
 | Python 依赖 | `streamer/requirements.txt` | `langhua98/xiaoju-video` 的 `streamer/requirements.txt`（线上真正用的） |
 | 行为说明 | 代码 | `README.md`（频道主的手册）；改了约定再加上本文件 |
@@ -500,18 +494,17 @@ Worker 和流式服务没法同时上线，所以改动要**两边都向后兼�
 3. 加测试；如果响应里可能带上用户数据，确认没有密钥、`file_id`。
 4. 更新 `README.md` 的路由表和本文件 2.2。
 
-**加一张表或一列**：见 6.7。写在 `Library` 构造函数里，可以重复执行；`Library` 里加读写方法；测试里用 `makeLibrary()` 重新建库，验证老数据能升级（参考「切片那一版的数据库」那个用例）。
+**加一张表或一列**：见 6.6。写在 `Library` 构造函数里，可以重复执行；`Library` 里加读写方法；测试里用 `makeLibrary()` 重新建库，验证老数据能升级（参考「切片那一版的数据库」那个用例）。
 
 **加一个搬运网站**
 1. 在 `streamer/harvest/sites.py` 写适配器类：`key`、`name`、`match(url)`、`items(url, limit, http)`（异步生成器，给出 `Track`）；能按关键词搜的加 `search(query, limit, http)`；下载地址要现取的加 `download(track, http, cookie)`；能判断网址类型的加 `describe(url, http)`；有主页热门歌的加 `hot(url, http)`。
 2. 放进 `ADAPTERS`。
 3. Worker 的 `HARVEST_SITES` 加 `{key: '显示名'}`。
 4. `test_harvest.py` 用假的 `Http` 写测试（参考 `test_netease_*`）。
-5. 不要加任何「解灰」、找替代音源的逻辑（6.2）。
 
 **改流式服务的接口**：两边一起改、一起测，保证向后兼容（4.3）；PR 描述写清楚先部署哪边。
 
-**改定时任务的频率或时间**：四处一起改（6.4），`test.mjs` 里的 `tick(...)` 也改；部署时 workflow 会重设 schedules，用 curl 部署的要单独设。
+**改定时任务的频率或时间**：四处一起改（6.3），`test.mjs` 里的 `tick(...)` 也改；部署时 workflow 会重设 schedules，用 curl 部署的要单独设。
 
 **改歌名整理、查重规则**：`summary()` 和 `clean_names()` 一起改，`norm()` 三处保持一致；两套测试都加用例。
 
