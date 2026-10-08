@@ -144,7 +144,7 @@ globalThis.fetch = async (input, init = {}) => {
     if (m[1] === 'harvest') {
       if (/example\.com/.test(body.url)) return Response.json({ detail: '这个网站还不支持' }, { status: 400 });
       if (bot.copyBusy) return Response.json({ detail: 'already running' }, { status: 409 });
-      return Response.json({ ok: true, site: '互联网档案馆 archive.org' });
+      return Response.json({ ok: true, site: '网易云音乐 music.163.com' });
     }
     return Response.json({ ok: true });
   }
@@ -884,35 +884,28 @@ await t('频道主：找 → 加入/移出歌单、删除（要确认）；统�
 await t('贴网址搬运：搬运设置可以开关网站和授权、改数量和歌单；网址连同设置交给流式服务；搬来的歌进指定歌单', async () => {
   await admin('playlists', { playlists: [{ name: '华语流行', tracks: [] }] });
   await dm(OWNER, '搬运设置');
-  let panel = lastSay();
-  assert.match(panel.text, /每次最多搬：20 首/);
-  const keys = panel.reply_markup.inline_keyboard.flat().map(b => b.text);
-  assert.ok(keys.includes('✅ 互联网档案馆') && keys.includes('✅ CC BY-NC-ND'));
-  await press(OWNER, 'hl:by-nd');
-  const edit = bot.out.filter(o => o.method === 'editMessageText').at(-1);
-  assert.ok(edit.reply_markup.inline_keyboard.flat().some(b => b.text === '⬜️ CC BY-ND'));
-  await press(OWNER, 'hs:commons');
-  await press(FAN, 'hl:by'); // 别人按没用
+  const panel = lastSay();
+  assert.match(panel.text, /每次最多抓：20 首/);
+  assert.match(panel.text, /支持：网易云音乐。抓到的全部进审核单/);
+  assert.equal(panel.reply_markup, undefined, '没有网站、授权开关了');
   await dm(OWNER, '搬运数量 30');
   await dm(OWNER, '搬运歌单 纯音乐');
   assert.match(lastSay().text, /新建了这个歌单/);
   assert.deepEqual((await lib.listPlaylists()).map(p => p.name), ['华语流行', '纯音乐']);
-  await dm(OWNER, 'https://archive.org/details/tpdm087');
+  await dm(OWNER, '分享小橘的单曲《晴天》: https://163cn.tv/abc (来自@网易云音乐)');
   const h = bot.toStreamer.at(-1);
   assert.equal(h.path, 'harvest');
-  assert.equal(h.body.url, 'https://archive.org/details/tpdm087');
-  assert.deepEqual(h.body.settings.sites, ['archive']);
-  assert.ok(!h.body.settings.licenses.includes('by-nd') && h.body.settings.licenses.includes('by'));
-  assert.equal(h.body.settings.limit, 30);
+  assert.equal(h.body.url, 'https://163cn.tv/abc', 'App 分享的整段文字也行');
+  assert.deepEqual(h.body.settings, { limit: 30, playlist: '纯音乐', sites: ['netease'] });
   assert.equal(h.body.notify, OWNER);
   assert.equal(h.body.link, BASE, '审核单里「查看全部」的网址');
-  assert.match(lastSay().text, /开始从互联网档案馆 archive.org搬，最多 30 首/);
-  await dm(OWNER, 'https://archive.org/details/x 5');
+  assert.match(lastSay().text, /开始从网易云音乐 music.163.com抓，最多 30 首。抓完发审核单给你/);
+  await dm(OWNER, 'https://music.163.com/#/artist?id=9 5');
   assert.equal(bot.toStreamer.at(-1).body.settings.limit, 5, '网址后面的数量只管这一次');
   await dm(OWNER, 'https://music.example.com/song/1');
-  assert.match(lastSay().text, /这个网站还不支持。现在支持：互联网档案馆、维基共享资源/);
+  assert.match(lastSay().text, /这个网站还不支持。现在支持：网易云音乐/);
   // 搬来的帖子（说明里有授权、来源）进「纯音乐」，不按类型分
-  const caption = 'Gymnopedie No. 1 — Kevin MacLeod\n授权：CC BY 署名\n来源：https://commons.wikimedia.org/wiki/File:x\n原作者以上述授权公开发布，转载请保留署名和来源。';
+  const caption = 'Gymnopedie No. 1 — Kevin MacLeod\n授权：频道主确认是小橘音乐自己的作品\n来源：https://music.163.com/song?id=11';
   await hook({ channel_post: { ...audioPost(980, { file_id: addFile(bytesOf(10, 980)), file_size: 10, title: 'Gymnopedie No. 1', performer: 'Kevin MacLeod' }), caption } });
   let pl = Object.fromEntries((await lib.listPlaylists()).map(p => [p.name, p.tracks]));
   assert.deepEqual([pl['纯音乐'], pl['华语流行']], [[980], []]);
@@ -924,13 +917,13 @@ await t('贴网址搬运：搬运设置可以开关网站和授权、改数量�
   pl = Object.fromEntries((await lib.listPlaylists()).map(p => [p.name, p.tracks]));
   assert.ok(!pl['华语流行'].includes(982));
   const st = await lib.getHarvest();
-  assert.deepEqual([st.sites, st.limit, st.playlist], [['archive'], 30, '']);
+  assert.deepEqual(st, { limit: 30, playlist: '' });
   for (const id of [980, 981, 982]) await admin('remove', { track: id });
   await admin('playlists', { playlists: [] });
 });
 
 await t('贴网址搬运的审核单：按通过 / 失败交给流式服务，审核单改成审过的样子；过期、在忙都说清楚；「查看全部」网页', async () => {
-  const sheetText = '🛂 审核单 abcdefghijklmn（互联网档案馆 archive.org，2 首没标明授权）\n网址：https://archive.org/details/x\n\n· 甲 — A：没有授权标记\n  https://archive.org/details/a\n\n逐个打开来源核对过、确认能转载再点「审核通过」，整批一起；不确定就点「审核失败」，一首都不发。';
+  const sheetText = '🛂 审核单 abcdefghijklmn（网易云音乐 music.163.com，2 首，确认是不是我们的歌）\n网址：https://music.163.com/#/artist?id=9\n\n· 甲 — A\n  https://music.163.com/song?id=1\n\n逐个核对，全是我们自己的歌再点「审核通过」，整批一起；有不是我们的就点「审核失败」，一首都不发。';
   const pressSheet = (from, data) => hook({ update_id: 3, callback_query: { id: 'cb', from: { id: from }, data,
     message: { message_id: 77, chat: { id: from, type: 'private' }, text: sheetText } } });
   const acks = () => bot.out.filter(o => o.method === 'answerCallbackQuery').at(-1).text;
@@ -949,7 +942,7 @@ await t('贴网址搬运的审核单：按通过 / 失败交给流式服务，�
   let e = lastEdit();
   assert.equal(e.message_id, 77);
   assert.ok(e.text.startsWith('🛂 审核单 abcdefghijklmn') && e.text.includes('· 甲 — A'));
-  assert.ok(!e.text.includes('逐个打开来源') && e.text.endsWith('✅ 审核通过：2 首开始发进频道，发完告诉你'));
+  assert.ok(!e.text.includes('逐个核对') && e.text.endsWith('✅ 审核通过：2 首开始发进频道，发完告诉你'));
   assert.equal(e.reply_markup, undefined, '按钮去掉了');
 
   bot.review = { result: 'rejected', count: 2 };
@@ -970,17 +963,17 @@ await t('贴网址搬运的审核单：按通过 / 失败交给流式服务，�
   // 「查看全部」
   let r = await req('/harvest-review/abcdefghijklmn');
   assert.equal(r.status, 404);
-  bot.sheet = { id: 'abcdefghijklmn', site: '互联网档案馆 archive.org', url: 'https://archive.org/details/x', status: 'review', tracks: [
-    { title: '甲 <b>', artist: 'A', license: '', page: 'https://archive.org/details/a', reason: '没有授权标记' },
-    { title: '乙', artist: '', license: 'x', page: 'javascript:alert(1)', reason: '认不出授权（x）' },
+  bot.sheet = { id: 'abcdefghijklmn', site: '网易云音乐 music.163.com', url: 'https://music.163.com/#/artist?id=9', status: 'review', tracks: [
+    { title: '甲 <b>', artist: 'A', page: 'https://music.163.com/song?id=1' },
+    { title: '乙', artist: '', page: 'javascript:alert(1)' },
   ] };
   r = await req('/harvest-review/abcdefghijklmn');
   assert.equal(r.status, 200);
   assert.equal(r.headers.get('X-Robots-Tag'), 'noindex');
   const page = await r.text();
   assert.ok(page.includes('甲 &lt;b&gt;') && !page.includes('甲 <b>'), '转义');
-  assert.ok(page.includes('href="https://archive.org/details/a"') && !page.includes('href="javascript:'), '只放 http(s) 链接');
-  assert.match(page, /2 首没标明授权，待审核/);
+  assert.ok(page.includes('href="https://music.163.com/song?id=1"') && !page.includes('href="javascript:'), '只放 http(s) 链接');
+  assert.match(page, /2 首，确认是不是我们的歌，待审核/);
   assert.equal((await req('/harvest-review/ABC')).status, 404);
   bot.review = bot.sheet = null;
 });

@@ -6,7 +6,7 @@ import urllib.error
 import urllib.parse
 import urllib.request
 
-UA = 'XiaojuMusicHarvester/1.0 (https://xiaoju-music.langhua98.workers.dev; licensed-audio importer)'
+UA = 'XiaojuMusicHarvester/1.0 (https://xiaoju-music.langhua98.workers.dev; own-song importer)'
 
 
 class Http:
@@ -15,7 +15,11 @@ class Http:
         self.lock = asyncio.Lock()  # 一个一个来，请求之间隔 gap 秒
 
     def _open(self, url, timeout):
-        return urllib.request.urlopen(urllib.request.Request(url, headers={'User-Agent': UA}), timeout=timeout)
+        headers = {'User-Agent': UA}
+        host = (urllib.parse.urlparse(url).hostname or '').lower()
+        if host == '163.com' or host.endswith('.163.com'):
+            headers['Referer'] = 'https://music.163.com/'  # 网易云的接口要带
+        return urllib.request.urlopen(urllib.request.Request(url, headers=headers), timeout=timeout)
 
     async def _fetch(self, url, read, timeout=60):
         wait = 5
@@ -31,6 +35,10 @@ class Http:
                 finally:
                     await asyncio.sleep(self.gap)
             await asyncio.sleep(min(wait, 120))
+
+    async def final_url(self, url):
+        """短链接跳到哪：跟着跳转走，返回最后的网址"""
+        return await self._fetch(url, lambda r: r.geturl())
 
     async def get_json(self, url, params=None):
         if params:

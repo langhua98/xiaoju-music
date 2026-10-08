@@ -44,7 +44,6 @@ from telethon.sessions import StringSession
 
 from harvest.job import Harvester
 from harvest.net import Http
-from harvest import license as harvest_license
 from harvest.sites import ADAPTERS as HARVEST_SITES
 
 # MTProto 每次最多取 512 KB；起点按它对齐，Telegram 才接受
@@ -465,7 +464,7 @@ def make_client(env):
 
 streamer = None
 
-harvester = None    # 授权音频搬运（贴网址搬）
+harvester = None    # 贴网址搬自己的歌（抓取 → 审核单 → 通过后发）
 
 bot_client = None   # 机器人账号（取文件、发通知）
 
@@ -719,18 +718,17 @@ async def auto_status(request: Request):
     st = copier.state
     return {k: st.get(k) for k in ('status', 'mode', 'run_id', 'sources', 'copied', 'error')}
 
-# ── 授权音频搬运：贴网址，每首检查授权，允许转载的发进频道，没标授权的交频道主审核（逻辑在 harvest/ 里）──
+# ── 贴网址搬自己的歌：抓出网址里的歌 → 审核单 → 频道主确认是我们的歌点通过 → 发进频道（逻辑在 harvest/ 里）──
 
 @app.get('/harvest/options')
 async def harvest_options(request: Request):
-    """搬运设置里能选的：支持的网站、认得的授权。"""
+    """搬运设置里能选的网站。"""
     check_key(request)
-    return {'sites': [{'key': a.key, 'name': a.name} for a in HARVEST_SITES],
-            'licenses': [{'key': k, 'name': v} for k, v in harvest_license.LABELS.items()]}
+    return {'sites': [{'key': a.key, 'name': a.name} for a in HARVEST_SITES]}
 
 @app.post('/harvest')
 async def harvest_start(request: Request):
-    """{url, settings: {sites, licenses, limit}, existing, notify, link}。网址不支持或网站关着 → 400 带原因；正在搬 → 409。"""
+    """{url, settings: {sites, limit}, existing, notify, link}：开始抓，抓完发审核单。网址不支持或网站关着 → 400 带原因；正在忙 → 409。"""
     check_key(request)
     if harvester is None:
         raise HTTPException(409, 'not ready')

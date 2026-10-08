@@ -45,8 +45,8 @@ Telethon 以 `receive_updates=False` 登录：这个会话只调用、不订阅�
 - `POST /login/code`、`POST /login/verify`：频道主账号登录（TG_USER_SESSION 由此生成）
 - `POST /copy/start`、`/copy/pick`、`/copy/status`、`/copy/stop`、`/auto/start`、`GET /auto/status`：搬歌
 - `POST /fulfill`：听众求歌；`GET /search/global`：在来源频道里搜
-- `POST /harvest`、`GET /harvest/status`：贴网址搬授权音频（`harvest/`）
-- `GET /harvest/review/<编号>`、`POST /harvest/review`：没标授权的审核单——查看每一首、频道主按「通过 / 失败」
+- `POST /harvest`、`GET /harvest/status`：贴网易云网址抓歌，抓完发审核单（`harvest/`）
+- `GET /harvest/review/<编号>`、`POST /harvest/review`：审核单——查看每一首、频道主按「通过 / 失败」，通过了才发进频道
 
 ## 为什么不在这里跑官方的 telegram-bot-api（`--local` 模式）
 
