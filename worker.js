@@ -1327,7 +1327,7 @@ const HELP = `我是小橘音乐的管理助手 🍊 常用的点下面的按钮
 搬 @频道名 100 —— 从这个频道搬 100 首中文歌（查重），搬完告诉你
 找 歌名 —— 在小橘音乐里找这首，可以加进/移出歌单、删除
 统计 —— 歌库和这几天搬歌的情况
-贴网易云主页链接（歌手主页、音乐人的用户主页） —— 记成小号：它的新歌不用你过目，直接发进频道（和小橘视频的小号一样）
+贴网易云主页链接（歌手主页、音乐人的用户主页） —— 记成小号：它热门前 50 首里库里没有的，不用你过目，直接发进频道（和小橘视频的小号一样）
 小号 —— 看加了哪些小号；「同步小号」现在把所有小号抓一遍；「删除小号 2」删第 2 个；每天凌晨 3 点自动同步
 贴专辑、歌单、单曲链接 —— 抓里面的歌，先列给你过目，确认是我们的歌点通过才发进频道；专辑、歌单会先告诉你一共几首、已有几首，点按钮选抓多少；后面直接加数量就不问了，比如「网址 30」
 爬 歌名或歌手 —— 不用网址，直接去网易云搜着抓，一样先列给你过目；可以加数量，比如「爬 小橘 30」
@@ -1734,7 +1734,7 @@ async function getAlts(env) {
 async function altsText(env) {
   const alts = await getAlts(env);
   if (!alts.length) return '还没加小号。把小号的网易云主页链接（歌手主页，或音乐人的用户主页）发给我就加上。';
-  return ['你的小号（新歌不用审核，直接发进频道）：',
+  return ['你的小号（热门前 50 首里库里没有的，不用审核，直接发进频道）：',
     ...alts.map((a, i) => `${i + 1}. ${a.name || '歌手 ' + a.id}\n   ${a.url}`),
     '', '「同步小号」现在抓一遍；「删除小号 2」删第 2 个；每天凌晨 3 点自动同步'].join('\n');
 }
@@ -1763,7 +1763,7 @@ async function syncAlts(env, chat, alts) {
   }
   const names = alts.map(a => a.name || a.id).join('、');
   if (r.status === 200) {
-    return say(env, chat, `开始同步小号「${names}」：库里没有的新歌直接发进${h.channel ? `测试频道 @${h.channel}` : '频道'}，不用审核，发完告诉你。`);
+    return say(env, chat, `开始同步小号「${names}」：每个号看热门前 50 首，库里没有的直接发进${h.channel ? `测试频道 @${h.channel}` : '频道'}，不用审核，发完告诉你。`);
   }
   if (r.status === 409 && r.data.detail && r.data.detail.busy) {
     return say(env, chat, `上一单还没做完：${r.data.detail.busy}。做完会通知你，到时发「同步小号」。`);
@@ -1794,7 +1794,7 @@ async function ownerLink(env, chat, url, n, origin) {
       alts.push(alt);
       await L.setConfig('neteaseAlts', JSON.stringify(alts));
     }
-    await say(env, chat, fresh ? `👥 加了小号「${alt.name || alt.id}」（第 ${alts.length} 个）。以后它的新歌不用审核，直接发进频道。` : `👥 「${alt.name || alt.id}」已经是小号了，现在同步一遍。`);
+    await say(env, chat, fresh ? `👥 加了小号「${alt.name || alt.id}」（第 ${alts.length} 个）。以后它热门前 50 首里库里没有的，不用审核，直接发进频道。` : `👥 「${alt.name || alt.id}」已经是小号了，现在同步一遍。`);
     return syncAlts(env, chat, [alt]);
   }
   if (n || d.kind === 'song') return ownerHarvest(env, chat, { url }, n, origin);

@@ -93,6 +93,13 @@ def test_netease_user_homepage_is_the_musician_and_counting(monkeypatch):
     with pytest.raises(ValueError, match='不是音乐人'):
         collect(NetEase(NE), 'https://music.163.com/#/user/home?id=78', http)
 
+    pages[NE + '/artist/top/song?id=9'] = {'code': 200, 'songs': [ne_song(51, '热门', ['小橘']), ne_song(52, '次热门', ['小橘'])]}
+
+    async def hot(url):
+        return [t.title async for t in NetEase(NE).hot(url, http)]
+    assert asyncio.run(hot(home)) == ['热门', '次热门'], '主页的热门 50 首'
+    assert asyncio.run(hot('https://music.163.com/album?id=5')) == [], '不是主页没有热门'
+
     monkeypatch.setattr('harvest.job.find_adapter', lambda url: NetEase(NE))
     h = Harvester(http=http, send=None)
     got = asyncio.run(h.count(home, SETTINGS, [('旧歌', '小橘')]))
@@ -402,7 +409,7 @@ def test_alt_sync_posts_new_songs_without_a_sheet():
     assert sent == [('甲', 'http://cdn/1?MUSIC_U=x', 'official'), ('乙', 'http://cdn/4?MUSIC_U=x', 'official')], '不出审核单，库里有的、重复的不发'
     assert said[0][0] == 9 and said[0][2] is None
     text = said[0][1]
-    assert text.startswith('👥 同步小号「小橘、朋友」：新歌 3 首，发进频道 2 首，没发 1 首')
+    assert text.startswith('👥 同步小号「小橘、朋友」：热门前 50 首里新歌 3 首，发进频道 2 首，没发 1 首（1 首库里已有）')
     assert '下架：网易云不给下载' in text and h.sheets == {}
 
 
@@ -418,7 +425,7 @@ def test_alt_sync_with_nothing_new():
         h.start_direct([{'url': 'u', 'name': '小橘'}], SETTINGS, [('旧歌', '小橘')], notify=9)
         await h.task
     asyncio.run(main())
-    assert said == ['👥 同步小号「小橘」：没有新歌（小橘音乐里已有 1 首）']
+    assert said == ['👥 同步小号「小橘」：热门前 50 首都在小橘音乐里了（1 首）']
 
 
 def test_rejecting_a_sheet_posts_nothing():

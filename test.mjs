@@ -940,8 +940,8 @@ await t('贴网址搬运：搬运设置可以开关网站和授权、改数量�
   assert.equal(cnt.body.notify, OWNER);
   assert.ok(Array.isArray(cnt.body.existing) && 'cookie' in cnt.body && cnt.body.channel === '');
   const told = bot.out.filter(o => o.method === 'sendMessage').slice(-2).map(o => o.text);
-  assert.match(told[0], /加了小号「小橘」（第 1 个）。以后它的新歌不用审核，直接发进频道/);
-  assert.match(told[1], /开始同步小号「小橘」：库里没有的新歌直接发进频道，不用审核/);
+  assert.match(told[0], /加了小号「小橘」（第 1 个）。以后它热门前 50 首里库里没有的，不用审核，直接发进频道/);
+  assert.match(told[1], /开始同步小号「小橘」：每个号看热门前 50 首，库里没有的直接发进频道，不用审核/);
   await dm(OWNER, 'https://music.163.com/artist?id=9');
   assert.match(bot.out.filter(o => o.method === 'sendMessage').at(-2).text, /已经是小号了/);
   assert.equal(JSON.parse(await lib.getConfig('neteaseAlts')).length, 1, '同一个号不加两次');

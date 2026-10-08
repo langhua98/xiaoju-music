@@ -26,7 +26,7 @@ def song_key(t):
 
 
 KEEP_SHEETS = 20  # 内存里最多留几张审核单（旧的丢掉）
-ALT_MOST = 300    # 同步小号一次最多发几首新歌（剩下的下次同步接着发）
+ALT_MOST = 50     # 同步小号：每个号只看热门的前 50 首（网站有「热门歌」就用它，没有就按顺序取前 50 首）
 
 
 def sheet_id():
@@ -106,7 +106,7 @@ class Harvester:
     # ── 小号：频道主亲手加的主页，抓到的新歌不用审核，直接发进频道（和小橘视频的小号一样）──
 
     def start_direct(self, alts, settings, existing, notify=None, channel='', cookie=''):
-        """alts：[{url, name}]，一个个抓主页，库里没有的新歌（一次最多 ALT_MOST 首）直接发，发完通知频道主"""
+        """alts：[{url, name}]，一个个看主页的热门前 ALT_MOST 首，库里没有的直接发，发完通知频道主"""
         if self.running():
             raise RuntimeError('already running')
         adapters = []
@@ -125,11 +125,17 @@ class Harvester:
         try:
             todo, queued = [], set()
             for adapter, alt in adapters:
-                async for t in adapter.items(alt['url'], 1000, self.http):
+                hot = getattr(adapter, 'hot', None)
+                found = hot(alt['url'], self.http) if hot else adapter.items(alt['url'], ALT_MOST, self.http)
+                n = 0
+                async for t in found:
+                    if n >= ALT_MOST:
+                        break
+                    n += 1
                     k = song_key(t)
                     if k in seen:
                         st['have'] += 1
-                    elif k not in queued and len(todo) < ALT_MOST:
+                    elif k not in queued:
                         queued.add(k)
                         todo.append((adapter, t))
             st['total'] = len(todo)
@@ -302,10 +308,10 @@ class Harvester:
             if st['status'] == 'error':
                 head += f'出错了：{st["error"]}（已发 {st["copied"]} 首）'
             elif not st['total']:
-                head += f'没有新歌（小橘音乐里已有 {st["have"]} 首）'
+                head += f'热门前 {ALT_MOST} 首都在小橘音乐里了（{st["have"]} 首）'
             else:
-                head += f'新歌 {st["total"]} 首，发进{where} {st["copied"]} 首' + (f'，没发 {st["total"] - st["copied"]} 首' if st['total'] > st['copied'] else '') + (
-                    f'（还有更多，下次同步接着发）' if st['total'] >= ALT_MOST else '')
+                head += f'热门前 {ALT_MOST} 首里新歌 {st["total"]} 首，发进{where} {st["copied"]} 首' + (
+                    f'，没发 {st["total"] - st["copied"]} 首' if st['total'] > st['copied'] else '') + (f'（{st["have"]} 首库里已有）' if st['have'] else '')
         elif st['status'] == 'error':
             head = f'⚠️ 出错了：{st["error"]}' + ('' if crawl else f'（已发 {st["copied"]} 首）')
         elif not rows:

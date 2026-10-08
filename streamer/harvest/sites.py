@@ -102,6 +102,14 @@ class NetEase:
         for s in songs[:limit]:
             yield self._track(s)
 
+    async def hot(self, url, http):
+        """主页（歌手主页、音乐人的用户主页）的热门歌：网易云的「热门 50 首」。不是主页 → 什么也没有"""
+        kind, sid = await self._parse(url, http)
+        if kind != 'artist':
+            return
+        for s in (await self._get(http, '/artist/top/song', id=sid)).get('songs') or []:
+            yield self._track(s)
+
     async def search(self, query, limit, http):
         """按关键词（歌名、歌手）搜单曲，网易云排好的顺序。"""
         offset = 0
