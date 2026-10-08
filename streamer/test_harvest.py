@@ -57,7 +57,7 @@ def ne_song(i, name, artists, ms=200000):
 def test_netease_song_album_playlist_artist_and_short_link():
     pages = {
         NE + '/song/detail/?ids=%5B11%5D': {'songs': [ne_song(11, '晴天', ['小橘', '朋友'])]},
-        NE + '/album/5': {'album': {'songs': [ne_song(21, '一', ['小橘']), ne_song(22, '二', ['小橘'])]}},
+        NE + '/v1/album/5': {'album': {'id': 5}, 'songs': [ne_song(21, '一', ['小橘']), ne_song(22, '二', ['小橘'])]},
         NE + '/v6/playlist/detail?id=7': {'playlist': {'trackIds': [{'id': 31}, {'id': 32}, {'id': 33}]}},
         NE + '/song/detail/?ids=%5B31%2C+32%5D': {'songs': [ne_song(31, '甲', ['A']), ne_song(32, '乙', ['B'])]},
         NE + '/v1/artist/songs?id=9&limit=50&offset=0': {'songs': [ne_song(41, '新歌', ['小橘'])], 'more': True},

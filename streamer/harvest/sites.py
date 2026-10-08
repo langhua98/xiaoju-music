@@ -49,8 +49,8 @@ class NetEase:
         if kind == 'song':
             songs = await self._details([sid], http)
         elif kind == 'album':
-            d = await http.get_json(f'{self.API}/album/{sid}')
-            songs = (d.get('album') or {}).get('songs') or []
+            d = await http.get_json(f'{self.API}/v1/album/{sid}')  # 旧的 /api/album/<id> 现在回 -462（要验证）
+            songs = d.get('songs') or []
         elif kind == 'playlist':
             d = await http.get_json(f'{self.API}/v6/playlist/detail', {'id': sid})
             ids = [str(x['id']) for x in ((d.get('playlist') or {}).get('trackIds') or [])][:limit]
