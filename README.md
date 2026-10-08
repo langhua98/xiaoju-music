@@ -1,6 +1,6 @@
 # 小橘音乐 · Telegram 频道音频中转（Cloudflare Worker）
 
-把 Telegram 频道 [@xiaojumusic](https://t.me/xiaojumusic) 里的音频变成**打开网页就能直接播放**的
+把 Telegram 频道「小橘🍊音乐」（id `-1003817921075`；原来叫 @xiaojumusic，2026 年 10 月改成私密频道、没有用户名了）里的音频变成**打开网页就能直接播放**的
 歌单，不需要登录 Telegram。代码从 [langhua98/Linggo](https://github.com/langhua98/Linggo) 的 `xiaoju-music/` 搬到这个仓库。
 
 - 播放页：https://xiaoju-music.langhua98.workers.dev
@@ -85,7 +85,7 @@ UTF-8、GBK、UTF-16 编码都认；配上之后可以把频道里的这条 `.lr
 | Durable Object | 绑定名 `LIB`，类 `Library`（SQLite，迁移标签 `v1`），位置提示 `apac` |
 | KV（旧） | `xiaoju-music-tracks`，id=`738216f3f7d64f1ab143128406d1b35e`，绑定名 `TRACKS`，只用于迁移 |
 | Secret | `TG_BOT_TOKEN`、`TG_WEBHOOK_SECRET`、`ADMIN_KEY`、`STREAMER_KEY` |
-| 普通变量 | `CHANNEL_ID=-1003817921075`、`CHANNEL_USERNAME=xiaojumusic`、`STREAMER_URL`（流式服务地址，空＝大文件不能播放） |
+| 普通变量 | `CHANNEL_ID=-1003817921075`、`CHANNEL_USERNAME=xiaojumusic`（频道改私密后这个用户名已经不存在，只剩管理接口原样返回它）、`STREAMER_URL`（流式服务地址，空＝大文件不能播放） |
 | Telegram webhook | `…/tg-webhook`，`allowed_updates=["channel_post","edited_channel_post"]` |
 
 **secret 绝不能写进仓库**（这个仓库是公开的，GitHub Pages 会把它原样发布出去）。
@@ -105,7 +105,7 @@ Telegram 的 webhook（见下方「重设 webhook」）。
 |---|---|
 | `MUSIC_TG_BOT_TOKEN` | 音乐机器人 @xiaoju_music_bot 的 token（和本 Worker 的 `TG_BOT_TOKEN` 相同） |
 | `MUSIC_STREAMER_KEY` | 和本 Worker 的 `STREAMER_KEY` 相同（和视频的不是同一个） |
-| `MUSIC_TG_USER_SESSION` | （可选）@xiaojumusic 频道主账号的登录凭证；不设就用视频那边的 `TG_USER_SESSION`（同一个人的账号时） |
+| `MUSIC_TG_USER_SESSION` | （可选）小橘音乐频道主账号的登录凭证；不设就用视频那边的 `TG_USER_SESSION`（同一个人的账号时） |
 
 `TG_API_ID`、`TG_API_HASH` 两边共用。`MUSIC_TG_BOT_TOKEN` 和 `MUSIC_STREAMER_KEY` 都设了才会挂上 `/m`。
 

@@ -1484,7 +1484,7 @@ function harvestPanel(h, env, ne = {}) {
       `每次最多抓：${h.limit} 首（发「搬运数量 30」改）`,
       `搬到歌单：${h.playlist || '按类型自动分'}（发「搬运歌单 纯音乐」或「搬运歌单 自动」改）`,
       `网易云账号：${ne.cookie ? `${ne.nickname || '已登录'}（${new Date(ne.at).toISOString().slice(0, 10)} 登录；VIP 歌下不了就发「网易云登录」重新扫码）` : '没登录，VIP 歌下不了（发「网易云登录」扫码）'}`,
-      `发到频道：${h.channel ? `测试频道 @${h.channel}（不进小橘音乐；发「搬运频道 正式」改回）` : `正式频道 @${env.CHANNEL_USERNAME}（发「搬运频道 @测试频道」先发去试）`}`, '',
+      `发到频道：${h.channel ? `测试频道 @${h.channel}（不进小橘音乐；发「搬运频道 正式」改回）` : `正式频道「小橘🍊音乐」（发「搬运频道 @测试频道」先发去试）`}`, '',
       `支持：${Object.values(HARVEST_SITES).join('、')}（贴网址，或发「爬 歌名或歌手」去上面搜）。抓到的全部进审核单，你确认是我们自己的歌点「审核通过」才发进频道。`,
     ].join('\n'),
   };
@@ -1539,7 +1539,7 @@ async function setHarvestChannel(env, chat, name) {
   if (name === '正式') {
     h.channel = '';
     await L.setHarvest(h);
-    return say(env, chat, `好的，审核通过的歌发进正式频道 @${env.CHANNEL_USERNAME}`);
+    return say(env, chat, `好的，审核通过的歌发进正式频道「小橘🍊音乐」`);
   }
   const m = /^(?:@|https?:\/\/t\.me\/)?(\w{4,64})$/.exec(name);
   if (!m) return say(env, chat, '频道名不对：发「搬运频道 @频道用户名」，或「搬运频道 正式」');

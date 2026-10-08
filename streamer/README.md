@@ -29,7 +29,7 @@ Telethon 以 `receive_updates=False` 登录：这个会话只调用、不订阅�
 |---|---|
 | `TG_API_ID` / `TG_API_HASH` | 在 https://my.telegram.org 的「API development tools」申请的应用凭据 |
 | `TG_BOT_TOKEN` | 机器人 token，和 Worker 里的是同一个 |
-| `TG_CHANNEL` | 频道用户名：`xiaojumusic` |
+| `TG_CHANNEL` | （可选）频道的数字 id 或用户名；默认 `-1003817921075`（小橘🍊音乐，私密频道）。机器人按 id 找不到私密频道时改用频道主账号读频道 |
 | `STREAMER_KEY` | Worker 转发请求时带在 `X-Key` 请求头里的密钥，和 Worker 的 `STREAMER_KEY` 相同 |
 
 现在和小橘视频合用 Space `langhua1998/douyin-proxy`（挂在 `/m` 下）：上面这些名字在那里是视频的，音乐自己的值存成

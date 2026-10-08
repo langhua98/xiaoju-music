@@ -580,7 +580,14 @@ def test_music_prefixed_settings_win(monkeypatch):
     monkeypatch.delenv('TG_CHANNEL', raising=False)
     env = appmod.settings()
     assert env['TG_BOT_TOKEN'] == 'music-bot' and env['TG_API_ID'] == '1'
-    assert appmod.target_channel() == 'xiaojumusic'
+    assert appmod.target_channel() == appmod.PeerChannel(3817921075), '默认是小橘🍊音乐（私密频道）的 id'
+    monkeypatch.setenv('MUSIC_TG_CHANNEL', '@xiaoju_test')
+    assert appmod.target_channel() == 'xiaoju_test'
+    monkeypatch.setenv('MUSIC_TG_CHANNEL', '-1001234')
+    assert appmod.target_channel() == appmod.PeerChannel(1234)
+    assert appmod.is_target_channel(type('E', (), {'id': 1234, 'username': None})())
+    assert not appmod.is_target_channel(type('E', (), {'id': 99, 'username': 'x'})())
+    monkeypatch.delenv('MUSIC_TG_CHANNEL')
     monkeypatch.setattr(appmod, 'streamer', make(FakeTelegram()))
     client = TestClient(appmod.app)
     assert client.get('/stream/12', headers={'X-Key': 'video-key'}).status_code == 403

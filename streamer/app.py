@@ -14,7 +14,8 @@ Worker 遇到超过 20 MB 的歌，就把浏览器的 Range 请求转到这里�
 环境变量（在 Space 的 Settings → Variables and secrets 里设成 secret）：
   TG_API_ID / TG_API_HASH   my.telegram.org 申请的应用凭据
   TG_BOT_TOKEN              机器人 token（和小橘音乐 Worker 里的是同一个）
-  TG_CHANNEL                频道用户名，xiaojumusic
+  TG_CHANNEL                （可选）频道：数字 id（-100 开头）或用户名；默认 -1003817921075（小橘🍊音乐，私密频道，
+                            和 Worker 的 CHANNEL_ID 一样）。按 id 找频道要账号「见过」它：频道主账号启动时读一遍聊天列表
   STREAMER_KEY              Worker 转发请求时带的密钥（X-Key 请求头）
   TG_USER_SESSION           （可选）频道主账号的登录凭证，搬歌用；由 /login/verify 生成
 和小橘视频合用一个 Space 时（挂在它的 /m 下），两边的机器人、密钥不一样：音乐自己的值存成 MUSIC_ 开头的
@@ -41,7 +42,7 @@ from telethon.errors import ChatForwardsRestrictedError, FileReferenceExpiredErr
 from telethon.tl.functions.account import UpdateNotifySettingsRequest
 from telethon.tl.functions.channels import JoinChannelRequest
 from telethon.tl.functions.contacts import SearchRequest
-from telethon.tl.types import DocumentAttributeAudio, InputMessagesFilterMusic, InputMessagesFilterPhotos, InputPeerNotifySettings
+from telethon.tl.types import PeerChannel, DocumentAttributeAudio, InputMessagesFilterMusic, InputMessagesFilterPhotos, InputPeerNotifySettings
 from telethon.sessions import StringSession
 
 from harvest.job import Harvester
@@ -550,22 +551,28 @@ async def lifespan(app):
     except Exception:  # noqa: BLE001
         log.exception('api-enhanced failed to start')
 
+    # 读频道（取文件、封面、图片）优先用机器人；它按 id 找不到频道（私密频道）就换成频道主账号，见下面
+    reader = {'client': client}
+
     async def fetch_message(channel, message_id):
-        return await client.get_messages(channel, ids=message_id)
+        return await reader['client'].get_messages(channel, ids=message_id)
+
+    def iter_download(*a, **kw):
+        return reader['client'].iter_download(*a, **kw)
 
     async def download_thumb(msg):
         # 传消息本身（不是 msg.document）：Telethon 才能在文件引用过期时自己重取消息
-        return await client.download_media(msg, file=bytes, thumb=-1)
+        return await reader['client'].download_media(msg, file=bytes, thumb=-1)
 
     async def download_photo(msg):
         # 取边长不超过 800 的最大一档（当封面够清楚，又不至于太大）；都超过就取最小的
         sizes = [s for s in msg.photo.sizes if getattr(s, 'w', 0) and getattr(s, 'h', 0)]
         fit = [s for s in sizes if max(s.w, s.h) <= 800]
         size = max(fit, key=lambda s: s.w * s.h) if fit else min(sizes, key=lambda s: s.w * s.h)
-        return await client.download_media(msg, file=bytes, thumb=size)
+        return await reader['client'].download_media(msg, file=bytes, thumb=size)
 
-    streamer = Streamer(channel=env.get('TG_CHANNEL', 'xiaojumusic'), fetch_message=fetch_message,
-                        iter_download=client.iter_download, download_thumb=download_thumb, download_photo=download_photo)
+    streamer = Streamer(channel=target_channel(), fetch_message=fetch_message,
+                        iter_download=iter_download, download_thumb=download_thumb, download_photo=download_photo)
 
     global login
     login = Login(lambda session: TelegramClient(session, int(env['TG_API_ID']), env['TG_API_HASH'], receive_updates=False))
@@ -583,6 +590,14 @@ async def lifespan(app):
                 log.warning('TG_USER_SESSION is no longer valid')
         except Exception:  # noqa: BLE001 — 搬歌用不了不影响播放
             log.exception('user session failed')
+    try:
+        await client.get_entity(target_channel())  # 只确认机器人进得去，不读帖子
+    except Exception:  # noqa: BLE001
+        if user_client is not None:
+            log.warning('bot cannot find the channel; reading it with the channel owner account', exc_info=True)
+            reader['client'] = user_client
+        else:
+            log.exception('bot cannot find the channel and there is no owner account; big files will not play')
     try:
         yield
     finally:
@@ -667,8 +682,20 @@ async def viz(message_id: int, request: Request):
 
 # ── 登录、搬歌（都要 X-Key）─────────────────────────────────────────
 
+DEFAULT_CHANNEL = '-1003817921075'  # 小橘🍊音乐（2026 年 10 月改成私密频道，没有用户名了）
+
 def target_channel():
-    return settings().get('TG_CHANNEL', 'xiaojumusic')
+    """小橘音乐频道：数字 id → PeerChannel，否则当用户名"""
+    ref = (settings().get('TG_CHANNEL') or DEFAULT_CHANNEL).strip().lstrip('@')
+    if re.fullmatch(r'-?\d+', ref):
+        return PeerChannel(int(ref.removeprefix('-100').lstrip('-')))
+    return ref
+
+def is_target_channel(entity):
+    ref = target_channel()
+    if isinstance(ref, PeerChannel):
+        return getattr(entity, 'id', None) == ref.channel_id
+    return (getattr(entity, 'username', None) or '').lower() == ref.lower()
 
 @app.post('/login/code')
 async def login_code(request: Request):
@@ -690,6 +717,7 @@ async def login_verify(request: Request):
     set_user_client(client)
     me = await client.get_me()
     try:
+        await client.get_dialogs()  # 按 id 找频道要先「见过」它
         perm = await client.get_permissions(target_channel(), 'me')
         can_post = bool(perm.is_creator or (perm.is_admin and perm.post_messages))
     except Exception:  # noqa: BLE001 — 不在频道里
@@ -1051,7 +1079,7 @@ async def channels_archive_music(request: Request):
         name = (getattr(e, 'username', None) or '').lower()
         if not is_group_or_channel or not (MUSIC_WORDS.search(d.title or '') or name in also):
             continue
-        if (getattr(e, 'username', None) or '').lower() == target_channel().lower():
+        if is_target_channel(e):
             continue  # 小橘音乐自己不动
         done.append(d.title)
         if not dry:

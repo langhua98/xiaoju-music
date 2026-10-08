@@ -1031,7 +1031,7 @@ await t('贴网址搬运的审核单：按通过 / 失败交给流式服务，�
   await pressSheet(OWNER, 'hv:no:abcdefghijklmn');
   assert.equal(bot.toStreamer.at(-1).body.cookie, '', '审核失败不带');
   await dm(OWNER, '搬运设置');
-  assert.match(lastSay().text, /发到频道：正式频道 @xiaojumusic/);
+  assert.match(lastSay().text, /发到频道：正式频道「小橘🍊音乐」/);
   bot.review = approved;
 
   bot.review = { result: 'rejected', count: 2 };
