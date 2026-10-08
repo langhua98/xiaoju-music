@@ -1,29 +1,13 @@
-# 临时：歌手主页、用户主页怎么数歌
+# 临时：Space 起来没有
 name: Probe NetEase VIP
 on:
   push:
     branches: [claude/probe-netease-search]
 jobs:
-  homepage:
+  space:
     runs-on: ubuntu-latest
     steps:
       - run: |
-          mkdir api && cd api && npm init -y >/dev/null && npm install --omit=dev --ignore-scripts --silent @neteasecloudmusicapienhanced/api@4.41.1
-          (PORT=3017 HOST=127.0.0.1 node node_modules/@neteasecloudmusicapienhanced/api/app.js >/dev/null 2>&1 &) ; sleep 8
-          python3 - <<'PY'
-          import json, urllib.request
-          B = 'http://127.0.0.1:3017'
-          g = lambda p: json.load(urllib.request.urlopen(B + p, timeout=60))
-          d = g('/artist/detail?id=5781')['data']
-          print('artist/detail keys', sorted(d), '| artist', {k: d['artist'].get(k) for k in ('name', 'musicSize', 'albumSize')})
-          u = d.get('user') or {}
-          print('artist.user', {k: u.get(k) for k in ('userId', 'nickname', 'artistId', 'userType')})
-          s = g('/artist/songs?id=5781&limit=2&offset=0&order=time')
-          print('artist/songs total', s.get('total'), 'more', s.get('more'), 'fee', [x.get('fee') for x in s.get('songs', [])])
-          if u.get('userId'):
-              p = g(f"/user/detail?uid={u['userId']}")
-              prof = p.get('profile') or {}
-              print('user/detail top keys', sorted(p)[:30])
-              print('profile', {k: prof.get(k) for k in ('nickname', 'artistId', 'userType', 'artistName')})
-              print('identify', p.get('identify'), '| bindings?', 'bindings' in p)
-          PY
+          curl -s https://huggingface.co/api/spaces/langhua1998/douyin-proxy/runtime | head -c 400; echo
+          curl -s -o /dev/null -w "music /m/: %{http_code}\n" -m 60 https://langhua1998-douyin-proxy.hf.space/m/
+          curl -s -m 60 https://langhua1998-douyin-proxy.hf.space/m/ | head -c 300; echo
