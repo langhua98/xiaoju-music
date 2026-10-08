@@ -63,7 +63,15 @@ class Harvester:
 
     def _fresh(self, kind, url, site):
         return {'status': 'running', 'kind': kind, 'url': url, 'site': site, 'copied': 0, 'skipped': 0,
-                'review': 0, 'review_id': '', 'results': [], 'new_ids': [], 'error': ''}
+                'review': 0, 'review_id': '', 'results': [], 'new_ids': [], 'error': '', 'total': 0}
+
+    def busy_text(self):
+        """正在忙什么（给频道主看：一次只做一单，上一单做完才能开始下一单）"""
+        st = self.state
+        if st.get('kind') == 'post':
+            return f'正在把审核通过的 {st["total"]} 首发进频道（已发 {st["copied"]} 首，处理到第 {len(st["results"])} 首）'
+        what = f'搜「{st["query"]}」' if st.get('query') else '抓上一个网址'
+        return f'正在{what}的歌、凑审核单（已看了 {len(st.get("results") or [])} 首）'
 
     async def _notify(self, notify, *messages):
         if not (notify and self.say):
@@ -198,6 +206,7 @@ class Harvester:
 
     async def _post(self, sheet, seen, notify, channel='', cookie=''):
         st = self.state
+        st['total'] = len(sheet['tracks'])
         download = getattr(sheet.get('adapter'), 'download', None)  # 下载地址要现取的网站
         send = (lambda *a: self.send(*a, channel=channel)) if channel else self.send
         try:

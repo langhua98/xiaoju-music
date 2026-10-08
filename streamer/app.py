@@ -772,7 +772,7 @@ async def harvest_start(request: Request):
     except ValueError as e:
         raise HTTPException(400, str(e))
     except RuntimeError:
-        raise HTTPException(409, 'already running')
+        raise HTTPException(409, {'busy': harvester.busy_text()})
     return {'ok': True, 'site': harvester.state.get('site')}
 
 @app.post('/harvest/count')
@@ -820,7 +820,7 @@ async def harvest_decide(request: Request):
         raise HTTPException(400, 'bad channel')
     result, count = harvester.decide(str(body.get('id', '')), bool(body.get('ok')), existing,
                                      notify=body.get('notify') or None, channel=channel, cookie=str(body.get('cookie') or ''))
-    return {'result': result, 'count': count, 'channel': channel}
+    return {'result': result, 'count': count, 'channel': channel, 'busy': harvester.busy_text() if result == 'busy' else ''}
 
 # ── 网易云登录：频道主扫码，登录凭证（cookie）先留在这里，Worker 下次来（GET /netease/session）取走存着，
 # 每次审核通过时带过来取 VIP 歌的下载地址。不主动推给 Worker：Hugging Face 的机房挡掉了 *.workers.dev ──

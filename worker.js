@@ -1587,7 +1587,11 @@ async function ownerHarvest(env, chat, what, n, origin) {
     const why = r.data.detail || '这个网址搬不了';
     return say(env, chat, `${why}。${/不支持/.test(why) ? '现在支持：' + Object.values(HARVEST_SITES).join('、') + '。想加别的网站跟我说。' : ''}`);
   }
-  if (r.status === 409) return say(env, chat, '正在抓或发别的，等那边好了再来（好了会通知你）');
+  if (r.status === 409) {
+    const busy = r.data.detail && r.data.detail.busy;
+    if (!busy) return say(env, chat, '搬运服务正在启动，过一两分钟再发一次');
+    return say(env, chat, `上一单还没做完：${busy}。一次只做一单（抓 → 审核 → 发），做完会通知你，到时再发这个${what.query ? '' : '网址'}。`);
+  }
   if (r.status !== 200) return say(env, chat, `搬运服务正在唤醒，过一两分钟再发一次${what.query ? '' : '网址'}`);
   const where = r.data.site || '这个网站';
   return say(env, chat, `${what.query ? `开始在${where}搜「${what.query}」` : `开始从${where}抓`}，最多 ${settings.limit} 首。抓完发审核单给你，确认是我们的歌点通过才发进频道 👌`);
@@ -1638,7 +1642,7 @@ async function harvestDecide(env, cb, ok, ack) {
   }
   const { result, count } = r.data || {};
   if (r.status !== 200 || !result) return ack('搬运服务正在唤醒，过一两分钟再点');
-  if (result === 'busy') return ack('正在搬别的网址，等那边搬完再点');
+  if (result === 'busy') return ack(`上一单还没做完：${r.data.busy || '正在抓或发'}，做完再点`.slice(0, 190));
   const line = {
     approved: `✅ 审核通过：${count} 首开始发进${r.data.channel ? `测试频道 @${r.data.channel}` : '频道'}，发完告诉你`,
     rejected: `❌ 审核失败：${count} 首不发`,

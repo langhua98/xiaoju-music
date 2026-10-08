@@ -145,7 +145,7 @@ globalThis.fetch = async (input, init = {}) => {
     if (m[1].startsWith('harvest/review/')) return bot.sheet ? Response.json(bot.sheet) : Response.json({ detail: 'no such sheet' }, { status: 404 });
     if (m[1] === 'harvest') {
       if (/example\.com/.test(body.url)) return Response.json({ detail: '这个网站还不支持' }, { status: 400 });
-      if (bot.copyBusy) return Response.json({ detail: 'already running' }, { status: 409 });
+      if (bot.harvestBusy) return Response.json({ detail: bot.harvestBusy }, { status: 409 });
       return Response.json({ ok: true, site: '网易云音乐 music.163.com' });
     }
     return Response.json({ ok: true });
@@ -906,6 +906,14 @@ await t('贴网址搬运：搬运设置可以开关网站和授权、改数量�
   assert.equal(bot.toStreamer.at(-1).body.settings.limit, 5, '网址后面的数量只管这一次');
   await dm(OWNER, 'https://music.example.com/song/1');
   assert.match(lastSay().text, /这个网站还不支持。现在支持：网易云音乐/);
+  // 一次只做一单：上一单还在发，说清楚在忙什么；服务刚启动（搬运还没准备好）不说成在忙
+  bot.harvestBusy = { busy: '正在把审核通过的 20 首发进频道（已发 5 首，处理到第 6 首）' };
+  await dm(OWNER, 'https://music.163.com/#/song?id=1 5');
+  assert.equal(lastSay().text, '上一单还没做完：正在把审核通过的 20 首发进频道（已发 5 首，处理到第 6 首）。一次只做一单（抓 → 审核 → 发），做完会通知你，到时再发这个网址。');
+  bot.harvestBusy = 'not ready';
+  await dm(OWNER, 'https://music.163.com/#/song?id=1 5');
+  assert.match(lastSay().text, /搬运服务正在启动/);
+  bot.harvestBusy = null;
   // 歌手主页、专辑、歌单（没写数量）：先数一数，按按钮再抓
   bot.count = { site: '网易云音乐 music.163.com', kind: 'artist', name: '小橘', total: 120, have: 30 };
   await dm(OWNER, 'https://music.163.com/#/user/home?id=77');
@@ -1036,9 +1044,9 @@ await t('贴网址搬运的审核单：按通过 / 失败交给流式服务，�
   assert.match(lastEdit().text, /过期了.*重新发一次网址/);
 
   const edits = bot.out.filter(o => o.method === 'editMessageText').length;
-  bot.review = { result: 'busy', count: 2 };
+  bot.review = { result: 'busy', count: 2, busy: '正在把审核通过的 20 首发进频道（已发 5 首，处理到第 6 首）' };
   await pressSheet(OWNER, 'hv:ok:abcdefghijklmn');
-  assert.match(acks(), /正在搬别的网址/);
+  assert.match(acks(), /上一单还没做完：正在把审核通过的 20 首发进频道（已发 5 首/);
   assert.equal(bot.out.filter(o => o.method === 'editMessageText').length, edits, '在忙：审核单不动，等会儿还能再点');
 
   // 「查看全部」

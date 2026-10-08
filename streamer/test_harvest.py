@@ -281,6 +281,9 @@ def test_approving_into_a_test_channel():
     asyncio.run(main())
     assert sent == ['xiaoju_test']
     assert said[-1].startswith('📥 审核通过的发进测试频道 @xiaoju_test 1 首')
+    h = Harvester(http=None, send=None)
+    h.state = {**h._fresh('post', '', 'x'), 'total': 20, 'copied': 5, 'results': [{}] * 6}
+    assert h.busy_text() == '正在把审核通过的 20 首发进频道（已发 5 首，处理到第 6 首）' 
 
 
 def test_approval_fetches_download_urls_with_the_login_cookie():
@@ -375,6 +378,7 @@ def test_approval_waits_while_busy_and_the_limit_caps_the_sheet():
         return r, h.sheet_info(sid)['status']
 
     st, published, _ = run_job(tracks, settings={'sites': ['netease'], 'limit': 3}, then=busy)
+    assert Harvester(http=None, send=None).busy_text().startswith('正在抓上一个网址')
     assert published == [] and st['review'] == 3
     assert st['then'] == (('busy', 3), 'review')
 
@@ -429,7 +433,7 @@ def test_harvest_endpoints(monkeypatch):
     assert c.get('/harvest/review/abcdefghijklmn', headers=key).status_code == 404
     assert c.get('/harvest/review/abcdefghijklmn').status_code == 403
     r = c.post('/harvest/review', json={'id': 'abcdefghijklmn', 'ok': True}, headers=key)
-    assert r.json() == {'result': 'missing', 'count': 0, 'channel': ''}
+    assert r.json() == {'result': 'missing', 'count': 0, 'channel': '', 'busy': ''}
     r = c.post('/harvest/review', json={'id': 'abcdefghijklmn', 'ok': True, 'channel': '@xiaoju_test'}, headers=key)
     assert r.json()['channel'] == 'xiaoju_test'
     assert c.post('/harvest/review', json={'id': 'x', 'ok': True, 'channel': 'bad name!'}, headers=key).status_code == 400
