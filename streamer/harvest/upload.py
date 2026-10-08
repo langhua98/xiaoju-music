@@ -1,6 +1,6 @@
-"""上传：把一首允许转载的音频下载下来，必要时转成 mp3，带上署名和授权信息发进频道。
+"""上传：把一首音频下载下来，必要时转成 mp3，带上署名和授权信息发进频道。
 
-不判断授权（调用前已经由 license.check 判断过），也不管从哪个网站来（那是 sites.py 的事）。"""
+不判断授权（调用前已经由 license.check 判断过，或频道主审核通过了），也不管从哪个网站来（那是 sites.py 的事）。"""
 
 import asyncio
 import subprocess
@@ -9,12 +9,19 @@ MAX_BYTES = 200 * 1024 * 1024   # 再大的不下（几个小时的录音）
 PLAYABLE = ('mp3', 'm4a', 'aac')  # 手机浏览器都能放的，原样发；别的（ogg、flac、wav）转成 mp3
 
 
+# 网站没标明授权、频道主审核通过的：授权一栏写这个，不说原作者以什么授权发布
+REVIEWED = '网站未标明，频道主核对来源后转载'
+
+
 def caption(track, license_label):
     """帖子说明：歌名、作者、授权、原始链接。网站据此显示来源，转载的人也能看到授权要求。"""
     lines = [track.title + (f' — {track.artist}' if track.artist else '')]
     lines.append(f'授权：{license_label}')
     lines.append(f'来源：{track.page_url}')
-    lines.append('原作者以上述授权公开发布，转载请保留署名和来源。')
+    if license_label == REVIEWED:
+        lines.append('原网页没有写明转载授权；转载请保留署名和来源，权利人如有异议请联系频道删除。')
+    else:
+        lines.append('原作者以上述授权公开发布，转载请保留署名和来源。')
     return '\n'.join(lines)[:1024]  # Telegram 帖子说明最长 1024 字
 
 

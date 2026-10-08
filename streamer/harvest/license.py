@@ -1,7 +1,7 @@
-"""授权检查：只认明确允许转载的授权（知识共享各类许可、公有领域）。
+"""授权检查：明确允许转载的授权（知识共享各类许可、公有领域）直接搬，没标授权、认不出来的交频道主审核。
 
 check(raw, accepted) 对每一首都要调用：raw 是网站给的授权（网址或简称），accepted 是频道主在设置里勾选的授权代码。
-认不出来的、版权保留的、频道主没勾选的，一律不搬，并给出原因。"""
+写明版权保留的、频道主没勾选的，一律不搬，并给出原因。"""
 
 import re
 
@@ -20,6 +20,8 @@ ALL = list(LABELS)
 
 _CC_URL = re.compile(r'creativecommons\.org/licenses/([a-z-]+)', re.I)
 _CC_TEXT = re.compile(r'\bcc[\s-]*(by(?:[\s-]*(?:nc|nd|sa))*)\b', re.I)
+# 写明版权保留：不交审核，直接不搬
+_RESERVED = re.compile(r'all\s+rights\s+reserved|版权所有|保留所有权利|rightsstatements\.org/vocab/inc|\bin\s+copyright\b|©', re.I)
 
 
 def classify(raw):
@@ -43,11 +45,13 @@ def classify(raw):
 
 
 def check(raw, accepted):
-    """→ (能不能搬, 授权代码或 None, 原因)。原因是给频道主看的一句话。"""
+    """→ (结论, 授权代码或 None, 原因)。结论：'ok' 直接搬 / 'review' 交频道主审核 / 'skip' 不搬。原因是给频道主看的一句话。"""
     code = classify(raw)
     if code is None:
         shown = (raw or '').strip()[:60]
-        return False, None, f'没有允许转载的授权标记（{shown}）' if shown else '没有授权标记'
+        if _RESERVED.search(raw or ''):
+            return 'skip', None, f'写明了版权保留（{shown}）'
+        return 'review', None, f'认不出授权（{shown}）' if shown else '没有授权标记'
     if code not in set(accepted or ()):
-        return False, code, f'授权是「{LABELS[code]}」，设置里没勾选'
-    return True, code, LABELS[code]
+        return 'skip', code, f'授权是「{LABELS[code]}」，设置里没勾选'
+    return 'ok', code, LABELS[code]

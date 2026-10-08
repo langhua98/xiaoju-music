@@ -52,7 +52,7 @@ const addFile = bytes => { const id = 'F' + (++seq); files.set(id, bytes); retur
 const bytesOf = (n, seed) => { const b = new Uint8Array(n); for (let i = 0; i < n; i++) b[i] = (i * 7 + seed + (i >> 12)) & 255; return b; };
 const calls = [];
 const OWNER = 777, FAN = 555;
-const bot = { out: [], toStreamer: [], search: [], pickId: 0, autoStatus: { status: 'idle' }, adminAsks: 0, copyBusy: false, streamerDown: false, copyFail: '' };
+const bot = { out: [], toStreamer: [], search: [], pickId: 0, autoStatus: { status: 'idle' }, adminAsks: 0, copyBusy: false, streamerDown: false, copyFail: '', review: null, sheet: null };
 const mode = { getFile: 'ok', expireOnce: false, streamer: 'ok', thumbs: 'ok', lrclib: 'ok', netease: 'ok', viz: 'ok' };
 // 模拟歌词来源：LRCLIB 的歌词库，网易云的歌和歌词
 const lrclibDb = [];
@@ -129,7 +129,7 @@ globalThis.fetch = async (input, init = {}) => {
     return Response.json({ code: 200, lrc: { version: 1, lyric: neteaseLyrics.get(Number(m[1])) || '' } });
   }
   // 机器人要用的流式服务接口：记下收到的请求，按 bot 里设好的回
-  if ((m = url.match(/^https:\/\/streamer\.example\/(fulfill|copy\/start|copy\/pick|auto\/start|auto\/status|search\/global|harvest)(?:\?(.*))?$/)) || url === STREAMER + '/') {
+  if ((m = url.match(/^https:\/\/streamer\.example\/(fulfill|copy\/start|copy\/pick|auto\/start|auto\/status|search\/global|harvest|harvest\/review(?:\/[a-z0-9]+)?)(?:\?(.*))?$/)) || url === STREAMER + '/') {
     if (bot.streamerDown) throw new TypeError('fetch failed');
     if (url === STREAMER + '/') return Response.json({ ok: true });
     assert.equal(headers.get('X-Key'), SKEY);
@@ -139,6 +139,8 @@ globalThis.fetch = async (input, init = {}) => {
     if (m[1] === 'copy/pick') return Response.json({ new_ids: [bot.pickId] });
     if (m[1] === 'copy/start' && bot.copyBusy) return Response.json({ detail: 'already running' }, { status: 409 });
     if (m[1] === 'auto/status') return Response.json(bot.autoStatus);
+    if (m[1] === 'harvest/review') return Response.json(bot.review);
+    if (m[1].startsWith('harvest/review/')) return bot.sheet ? Response.json(bot.sheet) : Response.json({ detail: 'no such sheet' }, { status: 404 });
     if (m[1] === 'harvest') {
       if (/example\.com/.test(body.url)) return Response.json({ detail: '这个网站还不支持' }, { status: 400 });
       if (bot.copyBusy) return Response.json({ detail: 'already running' }, { status: 409 });
@@ -903,6 +905,7 @@ await t('贴网址搬运：搬运设置可以开关网站和授权、改数量�
   assert.ok(!h.body.settings.licenses.includes('by-nd') && h.body.settings.licenses.includes('by'));
   assert.equal(h.body.settings.limit, 30);
   assert.equal(h.body.notify, OWNER);
+  assert.equal(h.body.link, BASE, '审核单里「查看全部」的网址');
   assert.match(lastSay().text, /开始从互联网档案馆 archive.org搬，最多 30 首/);
   await dm(OWNER, 'https://archive.org/details/x 5');
   assert.equal(bot.toStreamer.at(-1).body.settings.limit, 5, '网址后面的数量只管这一次');
@@ -924,6 +927,62 @@ await t('贴网址搬运：搬运设置可以开关网站和授权、改数量�
   assert.deepEqual([st.sites, st.limit, st.playlist], [['archive'], 30, '']);
   for (const id of [980, 981, 982]) await admin('remove', { track: id });
   await admin('playlists', { playlists: [] });
+});
+
+await t('贴网址搬运的审核单：按通过 / 失败交给流式服务，审核单改成审过的样子；过期、在忙都说清楚；「查看全部」网页', async () => {
+  const sheetText = '🛂 审核单 abcdefghijklmn（互联网档案馆 archive.org，2 首没标明授权）\n网址：https://archive.org/details/x\n\n· 甲 — A：没有授权标记\n  https://archive.org/details/a\n\n逐个打开来源核对过、确认能转载再点「审核通过」，整批一起；不确定就点「审核失败」，一首都不发。';
+  const pressSheet = (from, data) => hook({ update_id: 3, callback_query: { id: 'cb', from: { id: from }, data,
+    message: { message_id: 77, chat: { id: from, type: 'private' }, text: sheetText } } });
+  const acks = () => bot.out.filter(o => o.method === 'answerCallbackQuery').at(-1).text;
+  const lastEdit = () => bot.out.filter(o => o.method === 'editMessageText').at(-1);
+
+  bot.review = { result: 'approved', count: 2 };
+  const before = bot.toStreamer.length;
+  await pressSheet(FAN, 'hv:ok:abcdefghijklmn');
+  assert.equal(bot.toStreamer.length, before, '别人按没用');
+  await pressSheet(OWNER, 'hv:ok:abcdefghijklmn');
+  const call = bot.toStreamer.at(-1);
+  assert.equal(call.path, 'harvest/review');
+  assert.deepEqual([call.body.id, call.body.ok, call.body.notify], ['abcdefghijklmn', true, OWNER]);
+  assert.ok(Array.isArray(call.body.existing) && call.body.existing.length > 0, '带上库里已有的歌，通过时再查一次重');
+  assert.match(acks(), /审核通过：2 首开始发进频道/);
+  let e = lastEdit();
+  assert.equal(e.message_id, 77);
+  assert.ok(e.text.startsWith('🛂 审核单 abcdefghijklmn') && e.text.includes('· 甲 — A'));
+  assert.ok(!e.text.includes('逐个打开来源') && e.text.endsWith('✅ 审核通过：2 首开始发进频道，发完告诉你'));
+  assert.equal(e.reply_markup, undefined, '按钮去掉了');
+
+  bot.review = { result: 'rejected', count: 2 };
+  await pressSheet(OWNER, 'hv:no:abcdefghijklmn');
+  assert.equal(bot.toStreamer.at(-1).body.ok, false);
+  assert.match(lastEdit().text, /❌ 审核失败：2 首不发$/);
+
+  bot.review = { result: 'missing', count: 0 };
+  await pressSheet(OWNER, 'hv:ok:abcdefghijklmn');
+  assert.match(lastEdit().text, /过期了.*重新发一次网址/);
+
+  const edits = bot.out.filter(o => o.method === 'editMessageText').length;
+  bot.review = { result: 'busy', count: 2 };
+  await pressSheet(OWNER, 'hv:ok:abcdefghijklmn');
+  assert.match(acks(), /正在搬别的网址/);
+  assert.equal(bot.out.filter(o => o.method === 'editMessageText').length, edits, '在忙：审核单不动，等会儿还能再点');
+
+  // 「查看全部」
+  let r = await req('/harvest-review/abcdefghijklmn');
+  assert.equal(r.status, 404);
+  bot.sheet = { id: 'abcdefghijklmn', site: '互联网档案馆 archive.org', url: 'https://archive.org/details/x', status: 'review', tracks: [
+    { title: '甲 <b>', artist: 'A', license: '', page: 'https://archive.org/details/a', reason: '没有授权标记' },
+    { title: '乙', artist: '', license: 'x', page: 'javascript:alert(1)', reason: '认不出授权（x）' },
+  ] };
+  r = await req('/harvest-review/abcdefghijklmn');
+  assert.equal(r.status, 200);
+  assert.equal(r.headers.get('X-Robots-Tag'), 'noindex');
+  const page = await r.text();
+  assert.ok(page.includes('甲 &lt;b&gt;') && !page.includes('甲 <b>'), '转义');
+  assert.ok(page.includes('href="https://archive.org/details/a"') && !page.includes('href="javascript:'), '只放 http(s) 链接');
+  assert.match(page, /2 首没标明授权，待审核/);
+  assert.equal((await req('/harvest-review/ABC')).status, 404);
+  bot.review = bot.sheet = null;
 });
 
 await t('夜里自动搬：叫醒流式服务，带上每个频道上次看到哪条；上一晚搬完的记录合进来；还在搬就不再开', async () => {

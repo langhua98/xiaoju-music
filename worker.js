@@ -14,6 +14,7 @@
 //   GET  /c/<消息号>        封面：音乐文件自带的缩略图；没有就从频道的图片帖里随机挑一张，挑定后存进数据库
 //   GET  /l/<消息号>        歌词 JSON：先看数据库；没有就去 LRCLIB、网易云找，找到（或确定没有）就存起来
 //   POST /tg-webhook       Telegram 推送频道新帖，音频自动登记；回复某首歌发的 .lrc 文件就是这首的歌词
+//   GET  /harvest-review/<编号>  贴网址搬运的审核单「查看全部」：没标授权、等频道主审核的每一首（编号随机 14 位）
 //   GET  /admin            管理页（admin.html，管理密钥登录）：把频道里已删掉的帖子从歌单移除
 //   *    /admin/api/...    管理接口（Authorization: Bearer <ADMIN_KEY>）
 //
@@ -114,6 +115,8 @@ export default {
       if (v) return await viz(env, Number(v[1]));
       const l = path.match(/^\/l\/(\d{1,10})$/);
       if (l) return await lyrics(env, Number(l[1]));
+      const hr = path.match(/^\/harvest-review\/([a-z0-9]{14})$/);
+      if (hr) return await harvestReviewPage(env, hr[1], method);
       return text('Not Found', 404);
     } catch (e) {
       if (e instanceof HttpError) return text(e.message, e.status, e.headers);
@@ -1218,7 +1221,7 @@ const HELP = `我是小橘音乐的管理助手 🍊 常用的点下面的按钮
 搬 @频道名 100 —— 从这个频道搬 100 首中文歌（查重），搬完告诉你
 找 歌名 —— 在小橘音乐里找这首，可以加进/移出歌单、删除
 统计 —— 歌库和这几天搬歌的情况
-贴一个网址 —— 搬这个页面里允许转载的音频（每首都检查授权），后面可以加数量，比如「网址 30」
+贴一个网址 —— 搬这个页面里允许转载的音频（每首都检查授权；没标授权的先列给你过目，核对过来源点通过才搬），后面可以加数量，比如「网址 30」
 搬运设置 —— 选网站、接受哪些授权、每次搬几首、搬到哪个歌单
 直接发歌名 —— 和听众一样找这首歌，库里没有就自动搬进来（新歌按类型自动进歌单）
 `;
@@ -1281,7 +1284,7 @@ async function botUpdate(env, update, origin) {
     if ((c = /^搬\s*@?(\w{4,64})(?:\s+(\d{1,4}))?\s*(?:首)?$/.exec(t))) return ownerCopy(env, chat, c[1], Number(c[2] || 50));
     if ((c = /^找\s*(.+)$/.exec(t))) return ownerFind(env, chat, c[1].trim(), origin);
     if (/^(统计|今天搬了多少|搬了多少)/.test(t)) return ownerStats(env, chat);
-    if ((c = /(https?:\/\/\S+)(?:\s+(\d{1,3}))?/.exec(t))) return ownerHarvest(env, chat, c[1], c[2] ? Number(c[2]) : 0);
+    if ((c = /(https?:\/\/\S+)(?:\s+(\d{1,3}))?/.exec(t))) return ownerHarvest(env, chat, c[1], c[2] ? Number(c[2]) : 0, origin);
     if (/^搬运设置$/.test(t)) return showHarvest(env, chat);
     if ((c = /^搬运数量\s*(\d{1,3})$/.exec(t))) return setHarvestLimit(env, chat, Number(c[1]));
     if ((c = /^搬运歌单\s*(.+)$/.exec(t))) return setHarvestPlaylist(env, chat, c[1].trim());
@@ -1413,6 +1416,7 @@ async function botButton(env, cb, owner, origin) {
     await ack(`${valid[a]}：${on ? '开' : '关'}`);
     return tg(env, 'editMessageText', { chat_id: chat, message_id: cb.message.message_id, ...harvestPanel(h) });
   }
+  if (kind === 'hv') return harvestDecide(env, cb, a === 'ok', ack);
   if (kind === 'p') { // 搬搜到的那首
     await ack('搬运中…');
     try {
@@ -1464,6 +1468,7 @@ async function botButton(env, cb, owner, origin) {
 
 
 // ── 贴网址搬授权音频（真正干活的在流式服务的 harvest/ 里：网站适配器、逐首授权检查、上传） ──
+// 没标授权、认不出授权的不直接跳过：流式服务凑成一张审核单发给频道主（和小橘视频的审核单一样，整批「通过 / 失败」）
 const HARVEST_SITES = { archive: '互联网档案馆', commons: '维基共享资源' };
 const HARVEST_LICENSES = {
   cc0: 'CC0 放弃版权', pd: '公有领域', by: 'CC BY', 'by-sa': 'CC BY-SA', 'by-nc': 'CC BY-NC',
@@ -1475,7 +1480,7 @@ function harvestPanel(h) {
     '搬运设置（点按钮开关）', '',
     `每次最多搬：${h.limit} 首（发「搬运数量 30」改）`,
     `搬到歌单：${h.playlist || '按类型自动分'}（发「搬运歌单 纯音乐」或「搬运歌单 自动」改）`, '',
-    '只搬下面打 ✅ 的网站和授权；每一首都会检查授权，没有允许转载授权的不搬。',
+    '只搬下面打 ✅ 的网站。每一首都会检查授权：打 ✅ 的授权直接搬；没标授权、认不出授权的凑成审核单，你核对过来源点「审核通过」才搬；写明版权保留的和没勾选的授权不搬。',
   ];
   const btn = (k, name, on, kind) => ({ text: `${on ? '✅' : '⬜️'} ${name}`, callback_data: `${kind}:${k}` });
   return {
@@ -1519,14 +1524,14 @@ async function setHarvestPlaylist(env, chat, name) {
   return say(env, chat, `好的，搬来的歌都放进「${name}」${made ? '（新建了这个歌单）' : ''}`);
 }
 
-async function ownerHarvest(env, chat, url, n) {
+async function ownerHarvest(env, chat, url, n, origin) {
   if (!streamerOn(env)) return say(env, chat, '搬运服务没配置');
   const L = lib(env), settings = await L.getHarvest();
   if (n) settings.limit = Math.max(1, Math.min(n, 200));
   let r;
   try {
     r = await streamerCall(env, '/harvest', {
-      url, settings, notify: chat, existing: (await L.listTracks()).map(t => [t.title, t.artist]),
+      url, settings, notify: chat, link: origin, existing: (await L.listTracks()).map(t => [t.title, t.artist]),
     });
   } catch {
     return say(env, chat, '搬运服务正在唤醒，过一两分钟再发一次网址');
@@ -1537,7 +1542,65 @@ async function ownerHarvest(env, chat, url, n) {
   }
   if (r.status === 409) return say(env, chat, '正在搬别的网址，等那边搬完再来（搬完会通知你）');
   if (r.status !== 200) return say(env, chat, '搬运服务正在唤醒，过一两分钟再发一次网址');
-  return say(env, chat, `开始从${r.data.site || '这个网站'}搬，最多 ${settings.limit} 首。每首都会检查授权，搬完告诉你结果 👌`);
+  return say(env, chat, `开始从${r.data.site || '这个网站'}搬，最多 ${settings.limit} 首。每首都会检查授权，没标授权的搬完发审核单给你，搬完告诉你结果 👌`);
+}
+
+// 频道主按了审核单的按钮：交给流式服务，通过的开始发；审核单改成审过的样子、去掉按钮
+async function harvestDecide(env, cb, ok, ack) {
+  const id = String(cb.data).split(':')[2];
+  if (!streamerOn(env)) return ack('搬运服务没配置');
+  let r;
+  try {
+    r = await streamerCall(env, '/harvest/review', {
+      id, ok, notify: cb.from.id, existing: (await lib(env).listTracks()).map(t => [t.title, t.artist]),
+    });
+  } catch {
+    return ack('搬运服务正在唤醒，过一两分钟再点');
+  }
+  const { result, count } = r.data || {};
+  if (r.status !== 200 || !result) return ack('搬运服务正在唤醒，过一两分钟再点');
+  if (result === 'busy') return ack('正在搬别的网址，等那边搬完再点');
+  const line = {
+    approved: `✅ 审核通过：${count} 首开始发进频道，发完告诉你`,
+    rejected: `❌ 审核失败：${count} 首不发`,
+    done: '这张审核单已经审过了',
+    missing: '⌛ 这张审核单过期了（搬运服务重启过），要搬的话重新发一次网址',
+  }[result] || '';
+  await ack(line.slice(0, 190));
+  const msg = cb.message;
+  if (!msg) return;
+  const head = (msg.text || '').split('\n\n逐个打开来源')[0];
+  return tg(env, 'editMessageText', {
+    chat_id: msg.chat.id, message_id: msg.message_id, text: `${head}\n\n${line}`.slice(0, 4000), disable_web_page_preview: true,
+  });
+}
+
+// 审核单的「查看全部」：每一首的歌名、作者、网站给的授权、来源链接（编号随机 14 位，知道编号才打得开）
+async function harvestReviewPage(env, id, method) {
+  if (!streamerOn(env)) return text('Not Found', 404);
+  let r;
+  try {
+    r = await streamerCall(env, `/harvest/review/${id}`);
+  } catch {
+    return text('搬运服务正在唤醒，过一两分钟再刷新', 503);
+  }
+  if (r.status === 404) return text('没有这张审核单（可能搬运服务重启过）', 404);
+  if (r.status !== 200) return text('搬运服务正在唤醒，过一两分钟再刷新', 503);
+  const b = r.data;
+  const esc = s => String(s ?? '').replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' })[c]);
+  const href = u => /^https?:\/\//i.test(u || '') ? esc(u) : '#';
+  const state = { review: '待审核', approved: '已通过', rejected: '审核失败，不发' }[b.status] || b.status;
+  const rows = (b.tracks || []).map(t => `<li><b>${esc(t.title)}</b>${t.artist ? ' — ' + esc(t.artist) : ''}<br>
+<span class="m">${esc(t.reason)}</span><br><a href="${href(t.page)}" target="_blank" rel="noopener noreferrer">${esc(t.page)}</a></li>`).join('');
+  const page = `<!doctype html><html lang="zh"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<meta name="robots" content="noindex"><title>审核单 ${esc(b.id)}</title><style>
+body{font:15px/1.6 system-ui,sans-serif;margin:0;background:#fff;color:#222}main{max-width:720px;margin:0 auto;padding:16px}
+h1{font-size:18px}li{margin:0 0 12px;word-break:break-all}.m{color:#888;font-size:13px}a{color:#e8730c}
+@media(prefers-color-scheme:dark){body{background:#111;color:#ddd}}
+</style></head><body><main><h1>🛂 审核单 ${esc(b.id)}（${esc(b.site)}，${(b.tracks || []).length} 首没标明授权，${esc(state)}）</h1>
+<p class="m">网址：<a href="${href(b.url)}" target="_blank" rel="noopener noreferrer">${esc(b.url)}</a><br>
+逐个打开来源核对，确认能转载再回机器人点「✅ 审核通过」，整批一起；不确定就点「❌ 审核失败」。</p><ol>${rows}</ol></main></body></html>`;
+  return html(page, method, { 'X-Robots-Tag': 'noindex', 'Cache-Control': 'no-store' });
 }
 
 function rows(buttons, per = 2) {

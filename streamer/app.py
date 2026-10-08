@@ -34,7 +34,7 @@ from contextlib import asynccontextmanager
 import numpy as np
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import Response, StreamingResponse
-from telethon import TelegramClient
+from telethon import Button, TelegramClient
 from telethon.errors import ChatForwardsRestrictedError, FileReferenceExpiredError, FloodWaitError, SessionPasswordNeededError
 from telethon.tl.functions.account import UpdateNotifySettingsRequest
 from telethon.tl.functions.channels import JoinChannelRequest
@@ -495,11 +495,13 @@ def set_user_client(client):
 
     copier = Copier(iter_music=user_music(client), forward=forward, say=bot_say)
 
-async def bot_say(chat_id, text):
-    """用机器人给某个聊天发消息（通知频道主、回复求歌的人）。对方得先和机器人说过话才收得到。"""
+async def bot_say(chat_id, text, buttons=None):
+    """用机器人给某个聊天发消息（通知频道主、回复求歌的人）。对方得先和机器人说过话才收得到。
+    buttons：[[(文字, 按钮数据), ...], ...]，按了由 Worker 的 webhook 收（这个会话不收推送）"""
     if bot_client is None:
         return
-    await bot_client.send_message(int(chat_id), text, link_preview=False)
+    rows = [[Button.inline(t, d.encode()) for t, d in row] for row in buttons] if buttons else None
+    await bot_client.send_message(int(chat_id), text, link_preview=False, buttons=rows)
 
 @asynccontextmanager
 async def lifespan(app):
@@ -717,7 +719,7 @@ async def auto_status(request: Request):
     st = copier.state
     return {k: st.get(k) for k in ('status', 'mode', 'run_id', 'sources', 'copied', 'error')}
 
-# ── 授权音频搬运：贴网址，每首检查授权，允许转载的发进频道（逻辑在 harvest/ 里）──
+# ── 授权音频搬运：贴网址，每首检查授权，允许转载的发进频道，没标授权的交频道主审核（逻辑在 harvest/ 里）──
 
 @app.get('/harvest/options')
 async def harvest_options(request: Request):
@@ -728,7 +730,7 @@ async def harvest_options(request: Request):
 
 @app.post('/harvest')
 async def harvest_start(request: Request):
-    """{url, settings: {sites, licenses, limit}, existing, notify}。网址不支持或网站关着 → 400 带原因；正在搬 → 409。"""
+    """{url, settings: {sites, licenses, limit}, existing, notify, link}。网址不支持或网站关着 → 400 带原因；正在搬 → 409。"""
     check_key(request)
     if harvester is None:
         raise HTTPException(409, 'not ready')
@@ -738,7 +740,8 @@ async def harvest_start(request: Request):
         raise HTTPException(400, '不是网址')
     existing = [(str(t), str(a)) for t, a in body.get('existing', [])]
     try:
-        harvester.start(url, body.get('settings') or {}, existing, notify=body.get('notify') or None)
+        harvester.start(url, body.get('settings') or {}, existing, notify=body.get('notify') or None,
+                        link=str(body.get('link') or ''))
     except ValueError as e:
         raise HTTPException(400, str(e))
     except RuntimeError:
@@ -749,6 +752,27 @@ async def harvest_start(request: Request):
 async def harvest_status(request: Request):
     check_key(request)
     return harvester.state if harvester else {'status': 'idle'}
+
+@app.get('/harvest/review/{sid}')
+async def harvest_sheet(sid: str, request: Request):
+    """审核单的每一首（Worker 的「查看全部」网页用）。没有这张（服务重启过）→ 404"""
+    check_key(request)
+    info = harvester.sheet_info(sid) if harvester else None
+    if info is None:
+        raise HTTPException(404, 'no such sheet')
+    return info
+
+@app.post('/harvest/review')
+async def harvest_decide(request: Request):
+    """频道主按了审核单的按钮：{id, ok, existing, notify} → {result, count}。
+    result：approved 开始发 / rejected 不发 / done 已经审过 / busy 正在搬别的 / missing 没有这张（服务重启过）"""
+    check_key(request)
+    if harvester is None:
+        raise HTTPException(409, 'not ready')
+    body = await request.json()
+    existing = [(str(t), str(a)) for t, a in body.get('existing', [])]
+    result, count = harvester.decide(str(body.get('id', '')), bool(body.get('ok')), existing, notify=body.get('notify') or None)
+    return {'result': result, 'count': count}
 
 # ── 求歌：听众私聊机器人一个歌名，库里没有时到来源频道里找一首最像的搬进来 ──
 

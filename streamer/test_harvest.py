@@ -35,13 +35,16 @@ def test_license_classify(raw, code):
     assert lic.classify(raw) == code
 
 
-def test_license_check_needs_a_permissive_license_the_owner_enabled():
-    assert lic.check('https://creativecommons.org/licenses/by/4.0/', ['by'])[:2] == (True, 'by')
-    ok, code, why = lic.check('https://creativecommons.org/licenses/by-nc/4.0/', ['by', 'cc0'])
-    assert (ok, code) == (False, 'by-nc') and '没勾选' in why
-    ok, code, why = lic.check('All rights reserved', lic.ALL)
-    assert (ok, code) == (False, None) and '没有允许转载的授权' in why
-    assert lic.check('', lic.ALL)[2] == '没有授权标记'
+def test_license_check_copies_enabled_licenses_reviews_unknown_and_skips_reserved():
+    assert lic.check('https://creativecommons.org/licenses/by/4.0/', ['by'])[:2] == ('ok', 'by')
+    verdict, code, why = lic.check('https://creativecommons.org/licenses/by-nc/4.0/', ['by', 'cc0'])
+    assert (verdict, code) == ('skip', 'by-nc') and '没勾选' in why
+    for raw in ('All rights reserved', '© 2020 Some Label', 'http://rightsstatements.org/vocab/InC/1.0/', '版权所有'):
+        verdict, code, why = lic.check(raw, lic.ALL)
+        assert (verdict, code) == ('skip', None) and '版权保留' in why, raw
+    assert lic.check('', lic.ALL) == ('review', None, '没有授权标记')
+    verdict, _, why = lic.check('https://example.com/terms', lic.ALL)
+    assert verdict == 'review' and why == '认不出授权（https://example.com/terms）'
 
 
 # ── 网站适配器 ──
@@ -148,6 +151,16 @@ def test_publish_converts_non_mp3_and_writes_attribution():
     assert sent['text'].splitlines()[:3] == ['Gymnopedie No. 1 — Kevin MacLeod', '授权：CC BY 署名', '来源：https://c/wiki/File:x']
 
 
+def test_reviewed_caption_does_not_claim_a_license():
+    from harvest.sites import Track
+    from harvest.upload import REVIEWED
+    t = Track('Song', 'Band', 'u', '', 'https://archive.org/details/x')
+    c = caption(t, REVIEWED)
+    assert f'授权：{REVIEWED}' in c and '来源：https://archive.org/details/x' in c
+    assert '以上述授权公开发布' not in c and '没有写明转载授权' in c
+    assert '以上述授权公开发布' in caption(t, 'CC0（放弃版权）')
+
+
 def test_publish_refuses_huge_or_unconvertible():
     from harvest.sites import Track
     big = Track('x', '', 'u', 'cc0', 'p', 0, 999 * 1024 * 1024, 'mp3')
@@ -172,7 +185,8 @@ class Site:
             yield t
 
 
-def run_job(tracks, settings=ALL_SETTINGS, existing=(), fail=()):
+def run_job(tracks, settings=ALL_SETTINGS, existing=(), fail=(), then=None):
+    """then(h)：跑完以后接着做的事（比如按审核单的按钮），返回值放进 state['then']"""
     from harvest.sites import Track
     published, said = [], []
 
@@ -182,8 +196,8 @@ def run_job(tracks, settings=ALL_SETTINGS, existing=(), fail=()):
         published.append((t.title, label))
         return 100 + len(published)
 
-    async def say(chat, text):
-        said.append(text)
+    async def say(chat, text, buttons=None):
+        said.append((text, buttons) if buttons else text)
 
     async def sleep(n):
         pass
@@ -192,9 +206,12 @@ def run_job(tracks, settings=ALL_SETTINGS, existing=(), fail=()):
         h = Harvester(http=None, send=None, say=say, sleep=sleep, publish_fn=fake_publish)
         h.check_url = lambda url, s: (Site([Track(*x) for x in tracks]), None)
         h.state = {}
-        h.start('https://archive.org/details/x', settings, list(existing), notify=9)
+        h.start('https://archive.org/details/x', settings, list(existing), notify=9, link='https://w.example/')
         await h.task
-        return h.state
+        if then is None:
+            return h.state
+        out = await then(h)
+        return {**h.state, 'then': out}
 
     return asyncio.run(main()), published, said
 
@@ -207,18 +224,72 @@ def test_every_track_goes_through_the_license_check():
         ('丁', 'D', 'u4', 'https://creativecommons.org/licenses/by-nc/4.0/', 'p4'),
         ('戊', 'E', 'u5', 'CC0', 'p5'),
         ('己', 'F', 'u6', 'CC0', 'p6'),
+        ('庚', 'G', 'u7', '', 'p7'),  # 没标授权，但库里已经有了：不进审核单
     ]
     st, published, said = run_job(tracks, settings={'sites': ['archive'], 'licenses': ['by', 'cc0'], 'limit': 10},
-                                  existing=[('戊', 'E')], fail=['己'])
+                                  existing=[('戊', 'E'), ('庚', 'G')], fail=['己'])
     assert published == [('甲', 'CC BY 署名')]
     reasons = {r['title']: (r['status'], r.get('reason', '')) for r in st['results']}
-    assert reasons['乙'][0] == 'skipped' and '没有允许转载' in reasons['乙'][1]
-    assert reasons['丙'][1] == '没有授权标记'
+    assert reasons['乙'][0] == 'skipped' and '版权保留' in reasons['乙'][1]
+    assert reasons['丙'] == ('review', '没有授权标记')
     assert '没勾选' in reasons['丁'][1]
     assert reasons['戊'] == ('skipped', '小橘音乐里已经有了')
     assert reasons['己'] == ('failed', '下载失败')
-    assert st['copied'] == 1 and st['new_ids'] == [101]
-    assert '从假网站搬了 1 首，跳过 4 首' in said[0] and '乙：没有允许转载' in said[0]
+    assert reasons['庚'] == ('skipped', '小橘音乐里已经有了')
+    assert st['copied'] == 1 and st['new_ids'] == [101] and st['review'] == 1
+    assert '从假网站搬了 1 首，跳过 4 首，1 首没标明授权、等你审核' in said[0] and '乙：写明了版权保留' in said[0]
+    sheet, buttons = said[1]
+    sid = st['review_id']
+    assert f'🛂 审核单 {sid}' in sheet and '丙 — C：没有授权标记' in sheet and 'p3' in sheet
+    assert f'查看全部：https://w.example/harvest-review/{sid}' in sheet
+    assert buttons == [[('✅ 审核通过', f'hv:ok:{sid}'), ('❌ 审核失败', f'hv:no:{sid}')]]
+
+
+def test_approving_a_sheet_publishes_its_tracks_with_a_reviewed_label():
+    from harvest.upload import REVIEWED
+    tracks = [('甲', 'A', 'u1', '', 'p1'), ('乙', 'B', 'u2', 'https://example.com/terms', 'p2'),
+              ('丙', 'C', 'u3', '', 'p3'), ('甲', 'A', 'u1b', '', 'p1b')]  # 同一页里重复的只进一次
+
+    async def approve(h):
+        sid = h.state['review_id']
+        info = h.sheet_info(sid)
+        assert [t['title'] for t in info['tracks']] == ['甲', '乙', '丙'] and info['status'] == 'review'
+        # 审核期间丙已经被别的方式搬进来了：通过时再查一次重
+        assert h.decide(sid, True, [('丙', 'C')], notify=9) == ('approved', 3)
+        await h.task
+        assert h.decide(sid, True, [], notify=9) == ('done', 3)
+        assert h.decide('nosuchsheet000', True, []) == ('missing', 0)
+        return h.state
+
+    st, published, said = run_job(tracks, then=approve)
+    assert published == [('甲', REVIEWED), ('乙', REVIEWED)]
+    assert st['then']['copied'] == 2 and st['then']['skipped'] == 1
+    assert '从假网站搬了 2 首，跳过 1 首' in said[-1] and f'甲（{REVIEWED}）' in said[-1]
+
+
+def test_rejecting_a_sheet_publishes_nothing():
+    async def reject(h):
+        sid = h.state['review_id']
+        r = h.decide(sid, False, [])
+        return r, h.sheet_info(sid)['status'], h.decide(sid, True, [])
+
+    st, published, _ = run_job([('甲', 'A', 'u1', '', 'p1')], then=reject)
+    assert published == [] and st['then'] == (('rejected', 1), 'rejected', ('done', 1))
+
+
+def test_review_waits_while_another_harvest_runs_and_counts_toward_the_limit():
+    tracks = [(f'歌{i}', 'A', 'u', '', 'p') for i in range(8)]
+
+    async def busy(h):
+        sid = h.state['review_id']
+        h.task = asyncio.get_running_loop().create_future()  # 假装还在搬
+        r = h.decide(sid, True, [])
+        h.task.cancel()
+        return r, h.sheet_info(sid)['status']
+
+    st, published, _ = run_job(tracks, settings={'sites': ['archive'], 'licenses': ['cc0'], 'limit': 3}, then=busy)
+    assert published == [] and st['review'] == 3
+    assert st['then'] == (('busy', 3), 'review')
 
 
 def test_limit_counts_only_copied_tracks():
@@ -246,6 +317,10 @@ def test_harvest_endpoints(monkeypatch):
     assert r.status_code == 400 and r.json()['detail'] == '这个网站还不支持'
     assert c.post('/harvest', json={'url': 'not a url'}, headers=key).status_code == 400
     assert c.get('/harvest/status', headers=key).json() == {'status': 'idle'}
+    assert c.get('/harvest/review/abcdefghijklmn', headers=key).status_code == 404
+    assert c.get('/harvest/review/abcdefghijklmn').status_code == 403
+    r = c.post('/harvest/review', json={'id': 'abcdefghijklmn', 'ok': True}, headers=key)
+    assert r.json() == {'result': 'missing', 'count': 0}
 
 
 def test_titles_drop_a_leading_author():
@@ -253,3 +328,19 @@ def test_titles_drop_a_leading_author():
     assert _title('Kevin MacLeod - Erik Satie Gymnopedie No 1', 'Kevin MacLeod') == 'Erik Satie Gymnopedie No 1'
     assert _title('Gymnopedie', 'Kevin MacLeod') == 'Gymnopedie'
     assert _title('Kevin MacLeod', 'Kevin MacLeod') == 'Kevin MacLeod'
+
+
+def test_bot_say_turns_buttons_into_inline_buttons(monkeypatch):
+    sent = []
+
+    class Bot:
+        async def send_message(self, chat, text, **kw):
+            sent.append((chat, text, kw))
+
+    monkeypatch.setattr(appmod, 'bot_client', Bot())
+    asyncio.run(appmod.bot_say('9', '审核单', buttons=[[('✅ 审核通过', 'hv:ok:abc'), ('❌ 审核失败', 'hv:no:abc')]]))
+    asyncio.run(appmod.bot_say(9, '普通消息'))
+    (chat, text, kw), (_, _, plain) = sent  # Telethon 各版本按钮的字段不一样：data 在按钮上或 type 上
+    assert chat == 9 and [[(b.text, getattr(b, 'data', None) or b.type.data) for b in row] for row in kw['buttons']] == [
+        [('✅ 审核通过', b'hv:ok:abc'), ('❌ 审核失败', b'hv:no:abc')]]
+    assert plain['buttons'] is None
