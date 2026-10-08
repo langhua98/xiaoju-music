@@ -20,7 +20,6 @@ class Track:
     duration: float = 0   # 秒，不知道就是 0
     size: int = 0         # 字节，不知道就是 0
     ext: str = ''         # 文件扩展名（mp3 / ogg / flac ...）
-    blocked: str = ''     # 网站已经说了不给下载：原因（不进审核单）；空＝可以试
 
 
 def _text(v):
@@ -100,8 +99,6 @@ class NetEase:
             audio_url=f'https://music.163.com/song/media/outer/url?id={sid}.mp3',
             page_url=f'https://music.163.com/song?id={sid}',
             duration=(s.get('duration') or s.get('dt') or 0) / 1000, ext='mp3',
-            # fee：0 免费；1 VIP；4 要买专辑；8 免费但高音质要 VIP。不是 0 的外链下载地址都跳到 404
-            blocked='' if s.get('fee') in (None, 0) else '网易云不给下载（VIP 或付费的歌）',
         )
 
 

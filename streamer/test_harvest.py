@@ -97,12 +97,6 @@ def test_netease_search_pages_until_limit_or_end():
     titles, asked = search('小橘', 150)
     assert titles == ['甲', '乙'] and len(asked) == 1, '搜完了就停'
     assert search('none', 150)[0] == []
-    http = FakeHttp({NE + '/search/get?limit=100&offset=0&s=fee&type=1': {'result': {'songCount': 3, 'songs': [
-        {**ne_song(1, '免费', ['A']), 'fee': 0}, {**ne_song(2, 'VIP', ['A']), 'fee': 1}, {**ne_song(3, '高音质VIP', ['A']), 'fee': 8}]}}})
-
-    async def fees():
-        return [(t.title, bool(t.blocked)) async for t in NetEase().search('fee', 150, http)]
-    assert asyncio.run(fees()) == [('免费', False), ('VIP', True), ('高音质VIP', True)]
     pages[NE + '/search/get?limit=100&offset=0&s=enc&type=1'] = {'code': 200, 'result': '35b1748964af'}
     with pytest.raises(RuntimeError, match='格式变了'):
         search('enc', 150)
@@ -252,25 +246,6 @@ def test_approval_waits_while_busy_and_the_limit_caps_the_sheet():
 def test_nothing_found_sends_no_sheet():
     st, _, said = run_job([])
     assert said == ['这个网址里没找到歌'] and st['review_id'] == ''
-
-
-def test_songs_the_site_wont_serve_stay_off_the_sheet():
-    tracks = [Track('免费', 'A', 'u1', 'p1'), Track('VIP', 'A', 'u2', 'p2', blocked='网易云不给下载（VIP 或付费的歌）')]
-    published, said = [], []
-
-    async def say(chat, text, buttons=None):
-        said.append(text)
-
-    async def main():
-        h = Harvester(http=None, send=None, say=say)
-        site = Site(tracks)
-        h.check_url = lambda *a: (site, None)
-        h.start('https://music.163.com/#/artist?id=9', SETTINGS, [], notify=9)
-        await h.task
-        return h.state, h.sheet_info(h.state['review_id'])
-    st, sheet = asyncio.run(main())
-    assert [t['title'] for t in sheet['tracks']] == ['免费'] and st['skipped'] == 1
-    assert 'VIP：网易云不给下载（VIP 或付费的歌）' in said[0]
 
 
 def test_crawling_by_keyword_searches_the_site():

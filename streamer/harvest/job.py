@@ -109,10 +109,6 @@ class Harvester:
                     row['status'], row['reason'] = 'skipped', '小橘音乐里已经有了'
                     st['skipped'] += 1
                     continue
-                if t.blocked:  # 审核通过了也发不出去，不进审核单
-                    row['status'], row['reason'] = 'skipped', t.blocked
-                    st['skipped'] += 1
-                    continue
                 queued.add(song_key(t))
                 row['status'] = 'review'
                 pending.append(t)
