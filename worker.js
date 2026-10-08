@@ -91,8 +91,10 @@ export default {
   async scheduled(controller, env, ctx) {
     // 每分钟一次：后台补封面、歌词；每天一次（北京时间凌晨 3 点）：夜里自动搬
     if (controller.cron === FILL_CRON) {
-      ctx.waitUntil(fillMissing(env).catch(() => {}));
-      ctx.waitUntil(selfCheck(env, false).catch(() => {}));
+      // 结果打进 Worker 日志（wrangler tail / 控制台能看），不含 cookie
+      ctx.waitUntil(fillMissing(env).then(r => console.log('fill', JSON.stringify(r)), e => console.log('fill failed', String(e))));
+      ctx.waitUntil(selfCheck(env, false).then(h => console.log('self-check', JSON.stringify({ at: h.at, login: h.login, songs: h.songs, channel: h.channel, error: h.error })),
+        e => console.log('self-check failed', String(e))));
     }
     else ctx.waitUntil(nightly(env).catch(() => {}));
   },
@@ -431,6 +433,7 @@ async function selfCheck(env, force) {
     r = { status: 0 };
   }
   if (r.status !== 200) {  // 流式服务睡着、还没部署好：不占这一小时，下一分钟再试
+    console.log('self-check: streamer answered', r.status, JSON.stringify(r.data || {}).slice(0, 200));
     await L.setConfig('health', JSON.stringify(last));
     return last;
   }
