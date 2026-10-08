@@ -1,14 +1,16 @@
-# 临时：两个频道链接是不是同一个频道
+# 临时：歌手热门 50 首接口的返回
 name: Probe NetEase VIP
 on:
   push:
     branches: [claude/probe-netease-search]
 jobs:
-  channels:
+  hot:
     runs-on: ubuntu-latest
     steps:
       - run: |
-          for u in https://t.me/xiaojumusic https://t.me/+lNz0nvb9DLA3ODIx https://t.me/s/xiaojumusic; do
-            echo "== $u"
-            curl -sL -m 30 "$u" | grep -oE '<meta property="og:(title|description)" content="[^"]*"|tgme_page_extra">[^<]*|tgme_action_button_label">[^<]*|tgme_channel_info_counter"><span class="counter_value">[^<]*</span> <span class="counter_type">[^<]*' | head -6
-          done
+          mkdir api && cd api && npm init -y >/dev/null && npm install --omit=dev --ignore-scripts --silent @neteasecloudmusicapienhanced/api@4.41.1
+          (PORT=3017 HOST=127.0.0.1 node node_modules/@neteasecloudmusicapienhanced/api/app.js >/dev/null 2>&1 &) ; sleep 8
+          curl -s "http://127.0.0.1:3017/artist/top/song?id=5781" | python3 -c '
+          import json,sys; d=json.load(sys.stdin); s=d.get("songs") or []
+          print("code", d.get("code"), "| keys", sorted(d), "| songs", len(s))
+          print("first", [(x.get("name"), [a.get("name") for a in x.get("ar") or []], x.get("dt"), x.get("fee")) for x in s[:3]])'
