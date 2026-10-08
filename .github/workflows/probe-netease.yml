@@ -1,27 +1,31 @@
-# 临时：Cloudflare 记下的定时任务每次运行（时间、cron、结果、CPU）
+# 临时：抓 Worker 定时任务的日志（只输出定时任务的 cron、结果、报错和它自己打的日志，不输出访客请求）
 name: Probe NetEase VIP
 on:
   push:
     branches: [claude/probe-netease-search]
 jobs:
-  cron:
+  tail:
     runs-on: ubuntu-latest
     steps:
+      - run: npm install -g wrangler@3 --silent 2>/dev/null; wrangler --version
       - env:
           CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: aca35ff5f62ae4208757219dbc3b489b
         run: |
+          sleep 40   # 等 Worker 部署好
+          timeout 150 wrangler tail xiaoju-music --format json > tail.jsonl 2> tail.err || true
+          grep -v "^\s*$" tail.err | tail -5 | cut -c1-200
           python3 - <<'PY'
-          import json, os, urllib.request, datetime
-          since = (datetime.datetime.utcnow() - datetime.timedelta(hours=8)).strftime('%Y-%m-%dT%H:%M:%SZ')
-          q = '''query($acc: String!, $since: Time!) { viewer { accounts(filter: {accountTag: $acc}) {
-            workersInvocationsScheduled(filter: {scriptName: "xiaoju-music", datetime_geq: $since}, limit: 30, orderBy: [datetime_DESC]) {
-              datetime cron status cpuTimeUs } } } }'''
-          body = json.dumps({'query': q, 'variables': {'acc': 'aca35ff5f62ae4208757219dbc3b489b', 'since': since}}).encode()
-          req = urllib.request.Request('https://api.cloudflare.com/client/v4/graphql', data=body, headers={
-              'Authorization': 'Bearer ' + os.environ['CLOUDFLARE_API_TOKEN'], 'Content-Type': 'application/json'})
-          d = json.load(urllib.request.urlopen(req, timeout=30))
-          if d.get('errors'): print('errors', d['errors'])
-          rows = (((d.get('data') or {}).get('viewer') or {}).get('accounts') or [{}])[0].get('workersInvocationsScheduled') or []
-          print('rows', len(rows))
-          for r in rows: print(r)
+          import json, re
+          n = 0
+          for line in open('tail.jsonl', encoding='utf-8'):
+              try: e = json.loads(line)
+              except Exception: continue
+              ev = e.get('event') or {}
+              if 'cron' not in ev: continue
+              n += 1
+              logs = [re.sub(r'MUSIC_U=[^;" ]+', 'MUSIC_U=<redacted>', ' '.join(map(str, l.get('message') or [])))[:600] for l in e.get('logs') or []]
+              print('cron', ev.get('cron'), '| outcome', e.get('outcome'), '| exceptions', [x.get('message') for x in e.get('exceptions') or []][:3])
+              for l in logs: print('   ', l)
+          print('scheduled events seen:', n)
           PY
