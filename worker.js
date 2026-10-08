@@ -89,7 +89,9 @@ class HttpError extends Error {
 export default {
   // 每天北京时间凌晨 3 点（UTC 19:00）：自动去来源频道搬新歌
   async scheduled(controller, env, ctx) {
-    ctx.waitUntil(nightly(env).catch(() => {}));
+    // 每分钟一次：后台补封面、歌词；每天一次（北京时间凌晨 3 点）：夜里自动搬
+    if (controller.cron === FILL_CRON) ctx.waitUntil(fillMissing(env).catch(() => {}));
+    else ctx.waitUntil(nightly(env).catch(() => {}));
   },
   async fetch(request, env, ctx) {
     const url = new URL(request.url);
@@ -405,6 +407,29 @@ async function viz(env, id) {
   return new Response(fromBase64(b64), {
     headers: cors({ 'Content-Type': 'application/octet-stream', 'Cache-Control': 'public, max-age=2592000' }),
   });
+}
+
+// ── 后台补封面、歌词：每分钟挑一批还没找过（或该再找）的歌先找好存起来，打开时直接就有 ──
+// 一批不大：免费版 Worker 一次最多 50 个子请求；连着出错（服务睡着、网易云抽风、子请求用完）就停，下一分钟接着来
+const FILL_CRON = '* * * * *';
+const FILL_BATCH = 8;
+
+async function fillMissing(env) {
+  const { covers, lyrics: words } = await lib(env).missingArt(FILL_BATCH, FILL_BATCH, Date.now());
+  const jobs = [...covers.map(id => () => cover(env, id, false)), ...words.map(id => () => lyrics(env, id))];
+  let done = 0, fails = 0;
+  for (const job of jobs) {
+    if (fails >= 3) break;
+    try {
+      const res = await job();
+      if (res && res.body) await res.body.cancel();
+      done++;
+    } catch (e) {
+      if (e instanceof HttpError && e.status === 404) done++;  // 确定没有（已经记下了）
+      else fails++;
+    }
+  }
+  return { done, fails, covers: covers.length, lyrics: words.length };
 }
 
 // 网易云上这首歌的专辑封面（500×500）→ { mime, data }；没找到 → null；网易云出错就抛。
@@ -1160,6 +1185,23 @@ export class Library extends DurableObject {
     return r.mime === 'none' ? { none: true } : { mime: r.mime, b64: r.data, own: !!r.own };
   }
 
+  // 后台补全挑的歌：还没封面的；还没找过歌词、或到了该再找的时候的（随机挑，免得老卡在同几首上）
+  async missingArt(nCovers, nLyrics, now) {
+    const covers = this.sql.exec('SELECT id FROM songs WHERE id NOT IN (SELECT id FROM covers) ORDER BY RANDOM() LIMIT ?', nCovers).toArray().map(r => r.id);
+    const lyrics = this.sql.exec(`SELECT id FROM songs WHERE id NOT IN (SELECT id FROM lyrics)
+      OR id IN (SELECT id FROM lyrics WHERE retry_at > 0 AND retry_at <= ?) ORDER BY RANDOM() LIMIT ?`, now, nLyrics).toArray().map(r => r.id);
+    return { covers, lyrics };
+  }
+
+  // 封面、歌词各有多少（统计用）
+  async artStats(now) {
+    const c = this.sql.exec(`SELECT SUM(mime != 'none' AND own = 1) art, SUM(mime != 'none' AND own = 0) photo, SUM(mime = 'none') none,
+      (SELECT COUNT(*) FROM songs WHERE id NOT IN (SELECT id FROM covers)) todo FROM covers`).toArray()[0] || {};
+    const l = this.sql.exec(`SELECT SUM(src != 'none' AND retry_at = 0) synced, SUM(src != 'none' AND retry_at != 0) plain, SUM(src = 'none') none,
+      (SELECT COUNT(*) FROM songs WHERE id NOT IN (SELECT id FROM lyrics)) + COALESCE(SUM(retry_at > 0 AND retry_at <= ?), 0) todo FROM lyrics`, now).toArray()[0] || {};
+    return { covers: c, lyrics: l };
+  }
+
   // 补封面：用着频道图片、或记成没有封面的歌清掉封面，下次打开时重新找（会先找网易云的专辑封面）。返回清了几首
   async clearNonArtCovers() {
     return this.sql.exec("DELETE FROM covers WHERE own = 0 OR mime = 'none'").rowsWritten;
@@ -1363,11 +1405,11 @@ async function botUpdate(env, update, origin) {
     if (t === '补封面') {
       const n = await lib(env).clearNonArtCovers();
       listCache = null;
-      return say(env, chat, `好的，${n} 首没有专辑封面的歌（用着频道图片的、或之前没找到的）清掉了封面。有人打开时会先去网易云找这首的专辑封面，找不到再配频道图片。`);
+      return say(env, chat, `好的，${n} 首没有专辑封面的歌（用着频道图片的、或之前没找到的）后台重新找：先找网易云的专辑封面，找不到再配频道图片。每分钟补一批，不用等人打开；发「统计」看还剩多少。`);
     }
     if (t === '补歌词') {
       const n = await lib(env).retryLyrics();
-      return say(env, chat, `好的，${n} 首没歌词或只有文字的歌，有人打开时马上再去 LRCLIB、网易云找一次（手动配的不动）。`);
+      return say(env, chat, `好的，${n} 首没歌词或只有文字的歌，后台再去 LRCLIB、网易云找一次（手动配的不动）。每分钟补一批，不用等人打开；发「统计」看还剩多少。`);
     }
     if (t === '同步小号') {
       const alts = await getAlts(env);
@@ -1486,6 +1528,9 @@ async function ownerStats(env, chat) {
   const recent = d => tracks.filter(t => t.date > now - d * 86400).length;
   const auto = await L.getAuto();
   const lines = [`歌库一共 ${tracks.length} 首`, `最近 24 小时新增 ${recent(1)} 首，7 天 ${recent(7)} 首`];
+  const { covers: c, lyrics: w } = await L.artStats(Date.now());
+  lines.push(`封面：专辑图 ${c.art || 0} 首，频道图片 ${c.photo || 0} 首，没有 ${c.none || 0} 首` + (c.todo ? `，还有 ${c.todo} 首在后台找` : ''));
+  lines.push(`歌词：带时间轴 ${w.synced || 0} 首，只有文字 ${w.plain || 0} 首，没有 ${w.none || 0} 首` + (w.todo ? `，还有 ${w.todo} 首在后台找` : ''));
   if (auto.lastStart) lines.push(`上次夜里自动搬：${auto.lastStart.slice(0, 10)}${auto.lastCopied != null ? `，搬了 ${auto.lastCopied} 首` : ''}`);
   lines.push('', '各歌单：', ...(await L.listPlaylists()).map(p => `· ${p.name} ${p.tracks.length} 首`));
   return say(env, chat, lines.join('\n'));

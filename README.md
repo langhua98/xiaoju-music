@@ -74,8 +74,10 @@ Worker 先回 `503` + `Retry-After`，播放页提示「正在唤醒」并每 10
 
 **搬来的歌**：帖子说明里有「来源：https://music.163.com/song?id=…」的，直接按这个编号取网易云的歌词，不用模糊搜。
 
-**补全**：频道主私聊机器人发「补封面」（用着频道图片、或记成没有封面的歌清掉封面，下次打开时先找网易云的专辑封面）、
-「补歌词」（确定没有、只有文字的歌下次打开时马上再找一次；手动配的不动）。
+**后台补全**：Worker 的定时任务每分钟一次（`* * * * *`，`fillMissing`）随机挑 8 首还没有封面的、8 首还没找过歌词（或到了再找时间）的歌，
+先找好存起来，打开时直接就有；连着出错 3 次就停，下一分钟接着来。频道主私聊机器人发「补封面」（用着频道图片、或记成没有封面的歌
+清掉封面，后台重新找，先找网易云的专辑封面）、「补歌词」（确定没有、只有文字的歌后台马上再找一次；手动配的不动）；「统计」里有封面、
+歌词各有多少、还剩几首在后台找。
 
 **手动配**：在频道里**回复**那首歌，发一个 `.lrc` 文件，就是这首的歌词，自动找到的盖不掉它；再回复一个新的就换掉。
 不回复的话，按文件名找（`歌名.lrc` 或 `歌手 - 歌名.lrc`），只有唯一一首对得上才算。
@@ -241,11 +243,12 @@ Space 的 `Dockerfile`、`requirements.txt` 归视频仓库管：音乐要加新
   `/auto/status`，把每个来源频道「看到的最大消息号」合进 config 的 `auto.state`，再 `/auto/start`：每个频道只看
   比上次新的帖子（`min_id`），最多 30 首；第一次只看最新 10 首；禁止转发、出错的频道跳过。搬完机器人私聊频道主。
   手动跑一次：`POST /admin/api/auto-run`；看记录：`GET /admin/api/auto-state`。
-  定时任务的设置（部署脚本不会动它，改时间才需要）：
+  定时任务有两个：`0 19 * * *`（夜里自动搬、同步小号）和 `* * * * *`（后台补封面、歌词）。Actions 里的 **Deploy worker** 每次部署都会设好；
+  手动设：
 
   ```bash
   curl -X PUT "https://api.cloudflare.com/client/v4/accounts/$ACC/workers/scripts/xiaoju-music/schedules" \
-    -H "Authorization: Bearer $CLOUDFLARE_API_TOKEN" -H "Content-Type: application/json" -d '[{"cron":"0 19 * * *"}]'
+    -H "Authorization: Bearer $CLOUDFLARE_API_TOKEN" -H "Content-Type: application/json" -d '[{"cron":"0 19 * * *"},{"cron":"* * * * *"}]'
   ```
 
 ## 限制

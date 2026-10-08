@@ -1194,7 +1194,20 @@ await t('封面、歌词补全：没自带封面先用网易云的专辑封面�
   await dm(OWNER, '补歌词');
   assert.match(lastSay().text, /^好的，\d+ 首没歌词或只有文字的歌/);
   assert.equal((await lib.getLyrics(923)).retry_at, 1);
-  for (const id of [921, 922, 923]) await admin('remove', { track: id });
+  // 后台补全：每分钟的定时任务把还没找过的封面、歌词先找好存起来，不用等人打开
+  await hook({ channel_post: noThumb(924, { title: '柠檬水', performer: '小橘', duration: 150 }) });
+  assert.equal(await lib.getCover(924), null);
+  assert.equal(await lib.getLyrics(924), null);
+  const runs = [];
+  const tick = async cron => { await worker.scheduled({ cron }, env, { waitUntil: p => runs.push(p) }); await Promise.all(runs.splice(0)); };
+  for (let i = 0; i < 40 && (!(await lib.getCover(924)) || !(await lib.getLyrics(924))); i++) await tick('* * * * *');
+  assert.ok(await lib.getCover(924), '封面后台找好了');
+  assert.ok(await lib.getLyrics(924), '歌词后台找好了');
+  assert.equal((await lib.missingArt(50, 50, Date.now())).covers.includes(924), false);
+  await dm(OWNER, '统计');
+  assert.match(lastSay().text, /封面：专辑图 \d+ 首，频道图片 \d+ 首，没有 \d+ 首/);
+  assert.match(lastSay().text, /歌词：带时间轴 \d+ 首，只有文字 \d+ 首，没有 \d+ 首/);
+  for (const id of [921, 922, 923, 924]) await admin('remove', { track: id });
 });
 
 await t('路由：404、405、CORS 预检', async () => {
