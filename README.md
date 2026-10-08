@@ -234,7 +234,6 @@ Space 的 `Dockerfile`、`requirements.txt` 归视频仓库管：音乐要加新
   [api-enhanced](https://github.com/NeteaseCloudMusicApiEnhanced/api-enhanced)（npm 包 `@neteasecloudmusicapienhanced/api`，
   版本固定在 xiaoju-video 的 `streamer/Dockerfile` 里）。镜像构建时装到 `/opt/netease-api`，音乐的流式服务启动时用 `node` 在
   `127.0.0.1:3017` 拉起它（外面访问不到；它的输出丢掉，因为会打出登录 cookie）。没装时贴网址、爬歌报错，播放不受影响。
-  它的「解灰」（`ENABLE_GENERAL_UNBLOCK`、`unblock=true`，从别的平台找同名歌顶替）**不要开**：搬的是我们传到网易云的那个文件。
   **VIP 歌要登录**：频道主发「网易云登录」，流式服务（`POST /netease/login`）用机器人发二维码，扫码确认后 cookie 先留在流式服务内存里
   （流式服务推不到 Worker：Hugging Face 的机房按域名挡掉了 `*.workers.dev`），Worker 审核通过、看搬运设置时去 `GET /netease/session`
   取，比存着的新就存进 config 的 `netease`（Space 重启了也还在）；审核通过时 Worker 把它带给 `/harvest/review`，
