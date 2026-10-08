@@ -17,7 +17,15 @@ const LIMIT = 20 * MB;
 
 // ── 模拟 Durable Object（SQLite + 结构化克隆，和 RPC 一样不共享引用）──
 function makeSql(db = new DatabaseSync(':memory:')) {
-  return { exec: (query, ...params) => { const rows = db.prepare(query).all(...params).map(r => ({ ...r })); return { toArray: () => rows }; } };
+  return { exec: (query, ...params) => {
+    const st = db.prepare(query);
+    if (!/^\s*(SELECT|WITH|PRAGMA)\b/i.test(query) && !/\bRETURNING\b/i.test(query)) {  // 写入：和 Cloudflare 一样给 rowsWritten
+      const info = st.run(...params);
+      return { toArray: () => [], rowsWritten: Number(info.changes) };
+    }
+    const rows = st.all(...params).map(r => ({ ...r }));
+    return { toArray: () => rows, rowsWritten: 0 };
+  } };
 }
 async function makeLibrary(env, db) {
   let ready;
@@ -117,6 +125,10 @@ globalThis.fetch = async (input, init = {}) => {
     return Response.json(lrclibDb.filter(e => p.has('q')
       ? nn(p.get('q')).includes(nn(e.trackName))
       : nn(e.trackName).includes(nn(p.get('track_name'))) && (!p.has('artist_name') || nn(e.artistName).includes(nn(p.get('artist_name'))))));
+  }
+  if (url.startsWith('https://p1.music.126.net/')) {  // 网易云的专辑封面
+    assert.match(url, /\?param=500y500$/);
+    return new Response(new TextEncoder().encode('ALBUM:' + url.split('?')[0].split('/').pop()), { headers: { 'Content-Type': 'image/jpeg' } });
   }
   if (url === 'https://music.163.com/api/cloudsearch/pc') {
     if (mode.netease === 'down') throw new TypeError('fetch failed');
@@ -311,7 +323,7 @@ await t('封面：频道里一张图片都没有时记为没有；语音、不�
   assert.equal(r.status, 404);
   assert.match(r.headers.get('Cache-Control'), /max-age=86400/);
   await textOf(r);
-  assert.deepEqual(calls.map(c => c.url), [STREAMER + '/photos?upto=371'], '只扫一次频道图片');
+  assert.deepEqual(calls.map(c => c.url), ['https://music.163.com/api/cloudsearch/pc', STREAMER + '/photos?upto=371'], '先找网易云的专辑封面，没有再扫一次频道图片');
   calls.length = 0;
   assert.equal((await req('/c/71')).status, 404);
   assert.equal(calls.length, 0, '记下「没有」后不再去取');
@@ -1150,6 +1162,39 @@ await t('频道主的菜单：常驻按钮和 / 命令（只设给频道主）�
   assert.match(lastSay().text, /搬运设置/);
   await dm(FAN + 6, '/start');
   assert.ok(!lastSay().reply_markup, '听众没有频道主的按钮');
+});
+
+await t('封面、歌词补全：没自带封面先用网易云的专辑封面（搬来的按编号认，别的要歌名歌手时长对上）；「补封面」「补歌词」', async () => {
+  neteaseDb.push(
+    { id: 901, name: '橘子汽水', ar: [{ name: '小橘' }], dt: 200000, al: { picUrl: 'http://p1.music.126.net/x/orange.jpg' } },
+    { id: 902, name: '橘子汽水', ar: [{ name: '小橘' }], dt: 260000, al: { picUrl: 'http://p1.music.126.net/x/live.jpg' } },
+    { id: 903, name: '同名歌', ar: [{ name: '别人' }], dt: 200000, al: { picUrl: 'http://p1.music.126.net/x/other.jpg' } },
+  );
+  neteaseLyrics.set(902, lrcOf(['现场版一', '现场版二', '现场版三', '现场版四', '现场版五']));
+  const noThumb = (id, extra) => audioPost(id, { file_id: addFile(bytesOf(10, id)), file_size: 10, ...extra });
+  // 时长对得上：用网易云的专辑封面，算自带的（?art=1 也给）
+  await hook({ channel_post: noThumb(921, { title: '橘子汽水', performer: '小橘', duration: 201 }) });
+  let r = await req('/c/921?art=1');
+  assert.equal(r.status, 200);
+  assert.equal(await textOf(r), 'ALBUM:orange.jpg');
+  // 搬来的（说明里有网易云编号）：就认这一首，时长不比
+  const caption = '橘子汽水 — 小橘\n授权：频道主确认是小橘音乐自己的作品\n来源：https://music.163.com/song?id=902';
+  await hook({ channel_post: { ...noThumb(922, { title: '橘子汽水', performer: '小橘', duration: 100 }), caption } });
+  assert.equal(await textOf(await req('/c/922?art=1')), 'ALBUM:live.jpg');
+  assert.match((await jsonOf(await req('/l/922'))).lines.map(l => l[1]).join(), /现场版一/, '歌词也按编号取');
+  // 歌手对不上：不用网易云的图（退回频道图片，?art=1 没有）
+  await hook({ channel_post: noThumb(923, { title: '同名歌', performer: '小橘', duration: 200 }) });
+  assert.equal((await req('/c/923?art=1')).status, 404);
+  // 补封面：用着频道图片的、记成没有的清掉，下次重新找；网易云的专辑封面不动
+  await dm(OWNER, '补封面');
+  assert.match(lastSay().text, /^好的，\d+ 首没有专辑封面的歌/);
+  assert.ok(await lib.getCover(921), '网易云的专辑封面算自带的，不清');
+  assert.equal(await lib.getCover(923), null);
+  await lib.putLyrics(923, 'none', '', Date.now() + 1e9);
+  await dm(OWNER, '补歌词');
+  assert.match(lastSay().text, /^好的，\d+ 首没歌词或只有文字的歌/);
+  assert.equal((await lib.getLyrics(923)).retry_at, 1);
+  for (const id of [921, 922, 923]) await admin('remove', { track: id });
 });
 
 await t('路由：404、405、CORS 预检', async () => {

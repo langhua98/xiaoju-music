@@ -349,7 +349,16 @@ async function cover(env, id, artOnly) {
     if (!rec) throw new HttpError(404, '没有这首歌');
     let got = await fetchCover(env, rec), own = true;
     if (got && got !== 'none' && (await L.isLogo(toBase64(got.data)))) got = 'none'; // 别的频道的台标，不算封面
-    if (got === 'none'){ got = await photoCover(env); own = false; }
+    if (got === 'none') {  // 文件没自带封面：先找网易云上这首的专辑封面，没有再从频道图片里挑
+      let art;
+      try {
+        art = await neteaseCover({ ...summary(rec), neteaseId: neteaseIdOf(rec) });
+      } catch {
+        throw new HttpError(503, '封面暂时取不到', { 'Retry-After': '60' });  // 网易云这次出错：别存，下次再找
+      }
+      if (art) got = art;
+      else { got = await photoCover(env); own = false; }
+    }
     if (!got) throw new HttpError(503, '封面暂时取不到', { 'Retry-After': '60' });
     c = got === 'none' ? { none: true } : { mime: got.mime, b64: toBase64(got.data), own };
     await L.putCover(id, c.none ? 'none' : c.mime, c.none ? '' : c.b64, c.none ? 0 : own);
@@ -396,6 +405,36 @@ async function viz(env, id) {
   return new Response(fromBase64(b64), {
     headers: cors({ 'Content-Type': 'application/octet-stream', 'Cache-Control': 'public, max-age=2592000' }),
   });
+}
+
+// 网易云上这首歌的专辑封面（500×500）→ { mime, data }；没找到 → null；网易云出错就抛。
+// 搬来的歌按编号认；别的要歌名、歌手对上，时长相差 COVER_SLACK_S 秒以内（别的版本的封面不要）
+const COVER_SLACK_S = 10;
+async function neteaseCover(t) {
+  if (!t.title || t.kind === 'voice') return null;
+  const headers = { 'User-Agent': UA, Referer: 'https://music.163.com/' };
+  for (const title of titlesFor(t.title)) {
+    const body = new URLSearchParams({ s: (title + ' ' + t.artist).trim(), type: '1', limit: '10', offset: '0' });
+    const j = await getJson(NETEASE + '/cloudsearch/pc', { method: 'POST', body, headers });
+    const songs = (j && j.result && j.result.songs) || [];
+    const want = norm(cleanTitle(title));
+    let s = t.neteaseId && songs.find(x => String(x.id) === t.neteaseId);
+    if (!s) {
+      s = songs
+        .filter(x => want && norm(x.name).includes(want) && (!t.artist || (x.ar || []).some(a => sameArtist(t.artist, a.name))))
+        .map(x => ({ x, diff: Math.abs((x.dt || 0) / 1000 - t.duration) }))
+        .filter(p => p.diff <= COVER_SLACK_S)
+        .sort((a, b) => a.diff - b.diff)
+        .map(p => p.x)[0];
+    }
+    const pic = s && s.al && s.al.picUrl;
+    if (pic) {
+      const res = await fetch(pic.replace(/^http:/, 'https:') + '?param=500y500', { headers: { 'User-Agent': UA }, signal: AbortSignal.timeout(LYRICS_WAIT_MS) });
+      const img = await imageFrom(res, 'image/jpeg');
+      if (img) return img;
+    }
+  }
+  return null;
 }
 
 // 返回 { mime, data }；'none' 表示确定没有封面；null 表示这次没取到（别存，下次再试）
@@ -497,7 +536,7 @@ async function lyrics(env, id) {
   if (!row || (row.retry_at && row.retry_at < Date.now())) {
     const rec = await getRec(env, id);
     if (!rec) throw new HttpError(404, '没有这首歌');
-    const found = await findLyrics(summary(rec));
+    const found = await findLyrics({ ...summary(rec), neteaseId: neteaseIdOf(rec) });
     if (found) row = await L.putLyrics(id, found.src, found.lrc, found.retryAt);
     else if (!row) throw new HttpError(503, '歌词暂时取不到', { 'Retry-After': '60' });
   }
@@ -549,10 +588,25 @@ async function fromLrclib(t) {
   return { synced: null, plain };
 }
 
-// 网易云：搜歌（按歌名、歌手筛，时长最接近的两首），再取歌词
+// 从网易云搬来的歌（帖子说明里有「来源：https://music.163.com/song?id=…」）：它在网易云上的编号，歌词、封面直接按它取
+function neteaseIdOf(rec) {
+  const m = /^来源：https?:\/\/music\.163\.com\/song\?id=(\d+)/m.exec(rec.caption || '');
+  return m ? m[1] : '';
+}
+
+// 网易云：搬来的歌按编号直接取；别的搜歌（按歌名、歌手筛，时长最接近的两首），再取歌词
 async function fromNetease(t) {
   const headers = { 'User-Agent': UA, Referer: 'https://music.163.com/' };
   let plain = null;
+  if (t.neteaseId) {  // 就是这一首，不用比时长
+    const lj = await getJson(`${NETEASE}/song/lyric?id=${encodeURIComponent(t.neteaseId)}&lv=1&kv=1&tv=-1`, { headers });
+    const lrc = (lj && lj.lrc && lj.lrc.lyric) || '';
+    const words = plainText(lrc);
+    if (words.trim() && !/^纯音乐，请欣赏/.test(words.trim())) {
+      if (isSynced(lrc)) return { synced: { src: 'netease', lrc }, plain: null };
+      plain = { src: 'netease', lrc: words };
+    }
+  }
   for (const title of titlesFor(t.title)) {
     const body = new URLSearchParams({ s: (title + ' ' + t.artist).trim(), type: '1', limit: '10', offset: '0' });
     const j = await getJson(NETEASE + '/cloudsearch/pc', { method: 'POST', body, headers });
@@ -1106,6 +1160,16 @@ export class Library extends DurableObject {
     return r.mime === 'none' ? { none: true } : { mime: r.mime, b64: r.data, own: !!r.own };
   }
 
+  // 补封面：用着频道图片、或记成没有封面的歌清掉封面，下次打开时重新找（会先找网易云的专辑封面）。返回清了几首
+  async clearNonArtCovers() {
+    return this.sql.exec("DELETE FROM covers WHERE own = 0 OR mime = 'none'").rowsWritten;
+  }
+
+  // 补歌词：确定没有的、只有文字的（手动配的不动），下次打开时马上再找一次。返回几首
+  async retryLyrics() {
+    return this.sql.exec("UPDATE lyrics SET retry_at = 1 WHERE src != 'manual' AND (src = 'none' OR retry_at > 0)").rowsWritten;
+  }
+
   async putCover(id, mime, data, own = 1) {
     this.sql.exec(`INSERT INTO covers (id, mime, data, own) VALUES (?, ?, ?, ?)
       ON CONFLICT(id) DO UPDATE SET mime = excluded.mime, data = excluded.data, own = excluded.own`, id, mime, data, own ? 1 : 0);
@@ -1227,6 +1291,7 @@ const HELP = `我是小橘音乐的管理助手 🍊 常用的点下面的按钮
 爬 歌名或歌手 —— 不用网址，直接去网易云搜着抓，一样先列给你过目；可以加数量，比如「爬 小橘 30」
 搬运设置 —— 每次抓几首、搬到哪个歌单、先发到测试频道还是正式频道
 网易云登录 —— 扫码登录小橘音乐的网易云会员账号，VIP 歌才下得到；会员过期了续上再发一次
+补封面 / 补歌词 —— 没有专辑封面、没有歌词的歌重新找一遍（封面先找网易云的专辑图）
 直接发歌名 —— 和听众一样找这首歌，库里没有就自动搬进来（新歌按类型自动进歌单）
 `;
 
@@ -1295,6 +1360,15 @@ async function botUpdate(env, update, origin) {
     }
     if ((c = /(https?:\/\/\S+)(?:\s+(\d{1,3}))?/.exec(t))) return ownerLink(env, chat, c[1], c[2] ? Number(c[2]) : 0, origin);
     if (t === '小号') return say(env, chat, await altsText(env));
+    if (t === '补封面') {
+      const n = await lib(env).clearNonArtCovers();
+      listCache = null;
+      return say(env, chat, `好的，${n} 首没有专辑封面的歌（用着频道图片的、或之前没找到的）清掉了封面。有人打开时会先去网易云找这首的专辑封面，找不到再配频道图片。`);
+    }
+    if (t === '补歌词') {
+      const n = await lib(env).retryLyrics();
+      return say(env, chat, `好的，${n} 首没歌词或只有文字的歌，有人打开时马上再去 LRCLIB、网易云找一次（手动配的不动）。`);
+    }
     if (t === '同步小号') {
       const alts = await getAlts(env);
       if (!alts.length) return say(env, chat, '还没加小号：把小号的网易云主页链接发给我。');
