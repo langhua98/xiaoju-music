@@ -9,7 +9,7 @@ jobs:
     outputs:
       key: ${{ steps.qr.outputs.key }}
     steps:
-      - run: git clone --depth 1 https://github.com/NeteaseCloudMusicApiEnhanced/api-enhanced api && cd api && npm install --omit=dev --silent
+      - run: git clone --depth 1 https://github.com/NeteaseCloudMusicApiEnhanced/api-enhanced api && cd api && npm install --omit=dev --ignore-scripts --silent
       - id: qr
         run: |
           cd api && (PORT=3000 node app.js > ../api.log 2>&1 &) && sleep 8
@@ -32,7 +32,7 @@ jobs:
     needs: qr
     runs-on: ubuntu-latest
     steps:
-      - run: git clone --depth 1 https://github.com/NeteaseCloudMusicApiEnhanced/api-enhanced api && cd api && npm install --omit=dev --silent
+      - run: git clone --depth 1 https://github.com/NeteaseCloudMusicApiEnhanced/api-enhanced api && cd api && npm install --omit=dev --ignore-scripts --silent
       - env:
           KEY: ${{ needs.qr.outputs.key }}
         run: |
