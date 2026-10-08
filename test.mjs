@@ -129,7 +129,7 @@ globalThis.fetch = async (input, init = {}) => {
     return Response.json({ code: 200, lrc: { version: 1, lyric: neteaseLyrics.get(Number(m[1])) || '' } });
   }
   // 机器人要用的流式服务接口：记下收到的请求，按 bot 里设好的回
-  if ((m = url.match(/^https:\/\/streamer\.example\/(fulfill|copy\/start|copy\/pick|auto\/start|auto\/status|search\/global|harvest|harvest\/count|harvest\/review(?:\/[a-z0-9]+)?|netease\/login|netease\/session)(?:\?(.*))?$/)) || url === STREAMER + '/') {
+  if ((m = url.match(/^https:\/\/streamer\.example\/(fulfill|copy\/start|copy\/pick|auto\/start|auto\/status|search\/global|harvest|harvest\/count|harvest\/describe|harvest\/alts|harvest\/review(?:\/[a-z0-9]+)?|netease\/login|netease\/session)(?:\?(.*))?$/)) || url === STREAMER + '/') {
     if (bot.streamerDown) throw new TypeError('fetch failed');
     if (url === STREAMER + '/') return Response.json({ ok: true });
     assert.equal(headers.get('X-Key'), SKEY);
@@ -141,6 +141,8 @@ globalThis.fetch = async (input, init = {}) => {
     if (m[1] === 'auto/status') return Response.json(bot.autoStatus);
     if (m[1] === 'harvest/review') return Response.json(bot.review);
     if (m[1] === 'harvest/count') return Response.json(bot.count || {});
+    if (m[1] === 'harvest/describe') return Response.json(bot.describe || {});
+    if (m[1] === 'harvest/alts') return bot.harvestBusy ? Response.json({ detail: bot.harvestBusy }, { status: 409 }) : Response.json({ ok: true });
     if (m[1] === 'netease/session') return Response.json(bot.netease || {});
     if (m[1].startsWith('harvest/review/')) return bot.sheet ? Response.json(bot.sheet) : Response.json({ detail: 'no such sheet' }, { status: 404 });
     if (m[1] === 'harvest') {
@@ -914,18 +916,47 @@ await t('贴网址搬运：搬运设置可以开关网站和授权、改数量�
   await dm(OWNER, 'https://music.163.com/#/song?id=1 5');
   assert.match(lastSay().text, /搬运服务正在启动/);
   bot.harvestBusy = null;
-  // 歌手主页、专辑、歌单（没写数量）：先数一数，按按钮再抓
-  bot.count = { site: '网易云音乐 music.163.com', kind: 'artist', name: '小橘', total: 120, have: 30 };
-  await dm(OWNER, 'https://music.163.com/#/user/home?id=77');
+  // 主页（歌手主页、音乐人的用户主页）：记成小号，马上同步，新歌不审核直接发
+  bot.describe = { site: '网易云音乐 music.163.com', kind: 'artist', name: '小橘', id: '9' };
+  await dm(OWNER, '搬运频道 正式');
+  const before = bot.toStreamer.length;
+  await dm(OWNER, 'https://music.163.com/#/user/home?id=77 5');
+  assert.deepEqual(bot.toStreamer.slice(before).map(x => x.path), ['harvest/describe', 'netease/session', 'harvest/alts'], '主页写了数量也是小号');
   let cnt = bot.toStreamer.at(-1);
-  assert.equal(cnt.path, 'harvest/count');
-  assert.equal(cnt.body.url, 'https://music.163.com/#/user/home?id=77');
-  assert.ok(Array.isArray(cnt.body.existing));
-  assert.match(lastSay().text, /^歌手主页「小橘」：一共 120 首，小橘音乐里已有 30 首，没搬的 90 首。\n要抓多少？/);
+  assert.equal(cnt.path, 'harvest/alts');
+  assert.deepEqual(cnt.body.alts, [{ url: 'https://music.163.com/artist?id=9', name: '小橘' }]);
+  assert.equal(cnt.body.notify, OWNER);
+  assert.ok(Array.isArray(cnt.body.existing) && 'cookie' in cnt.body && cnt.body.channel === '');
+  const told = bot.out.filter(o => o.method === 'sendMessage').slice(-2).map(o => o.text);
+  assert.match(told[0], /加了小号「小橘」（第 1 个）。以后它的新歌不用审核，直接发进频道/);
+  assert.match(told[1], /开始同步小号「小橘」：库里没有的新歌直接发进频道，不用审核/);
+  await dm(OWNER, 'https://music.163.com/artist?id=9');
+  assert.match(bot.out.filter(o => o.method === 'sendMessage').at(-2).text, /已经是小号了/);
+  assert.equal(JSON.parse(await lib.getConfig('neteaseAlts')).length, 1, '同一个号不加两次');
+  bot.describe = { ...bot.describe, name: '朋友', id: '10' };
+  await dm(OWNER, 'https://music.163.com/artist?id=10');
+  await dm(OWNER, '👥 小号');
+  assert.match(lastSay().text, /1\. 小橘\n   https:\/\/music\.163\.com\/artist\?id=9\n2\. 朋友/);
+  await dm(OWNER, '同步小号');
+  assert.deepEqual(bot.toStreamer.at(-1).body.alts.map(a => a.name), ['小橘', '朋友']);
+  bot.harvestBusy = { busy: '正在同步小号：在找新歌' };
+  await dm(OWNER, '同步小号');
+  assert.match(lastSay().text, /上一单还没做完：正在同步小号：在找新歌/);
+  bot.harvestBusy = null;
+  await dm(OWNER, '删除小号 2');
+  assert.match(lastSay().text, /删掉了小号「朋友」/);
+  await dm(OWNER, '删除小号 5');
+  assert.match(lastSay().text, /没有这个编号/);
+  // 专辑、歌单（没写数量）：先数一数，按按钮再抓（照旧出审核单）
+  bot.describe = { site: '网易云音乐 music.163.com', kind: 'album', name: '晴天', id: '5' };
+  bot.count = { site: '网易云音乐 music.163.com', kind: 'album', name: '晴天', total: 120, have: 30 };
+  await dm(OWNER, 'https://music.163.com/album?id=5');
+  assert.equal(bot.toStreamer.at(-1).path, 'harvest/count');
+  assert.match(lastSay().text, /^专辑「晴天」：一共 120 首，小橘音乐里已有 30 首，没搬的 90 首。\n要抓多少？/);
   assert.deepEqual(lastSay().reply_markup.inline_keyboard, [[{ text: '抓 30 首', callback_data: 'hk:30' }, { text: '全部 90 首', callback_data: 'hk:90' }]]);
   await press(OWNER, 'hk:90');
   cnt = bot.toStreamer.at(-1);
-  assert.deepEqual([cnt.path, cnt.body.url, cnt.body.settings.limit], ['harvest', 'https://music.163.com/#/user/home?id=77', 90]);
+  assert.deepEqual([cnt.path, cnt.body.url, cnt.body.settings.limit], ['harvest', 'https://music.163.com/album?id=5', 90]);
   assert.match(lastSay().text, /最多 90 首/);
   assert.equal((await lib.getHarvest()).limit, 30, '按钮的数量只管这一次');
   bot.count = { ...bot.count, kind: 'album', name: '晴天', total: 500, have: 0 };
@@ -935,10 +966,10 @@ await t('贴网址搬运：搬运设置可以开关网站和授权、改数量�
   bot.count = { ...bot.count, total: 4, have: 4 };
   await dm(OWNER, 'https://music.163.com/album?id=5');
   assert.match(lastSay().text, /都搬过了/);
-  bot.count = { site: '网易云音乐 music.163.com', kind: 'song', name: '', total: 1, have: 0 };
+  bot.describe = { site: '网易云音乐 music.163.com', kind: 'song', name: '', id: '1' };
   await dm(OWNER, 'https://music.163.com/#/song?id=1');
   assert.equal(bot.toStreamer.at(-1).path, 'harvest', '单曲不用数，直接抓');
-  bot.count = null;
+  bot.count = bot.describe = null;
   // 爬 关键词：不用网址，去网站上搜着抓
   await dm(OWNER, '爬 小橘 晴天 8');
   const q = bot.toStreamer.at(-1);
@@ -1073,8 +1104,11 @@ await t('贴网址搬运的审核单：按通过 / 失败交给流式服务，�
 await t('夜里自动搬：叫醒流式服务，带上每个频道上次看到哪条；上一晚搬完的记录合进来；还在搬就不再开', async () => {
   await admin('sources', { sources: ['VmoMusic', 'yinyue555'] });
   bot.autoStatus = { status: 'idle' };
+  const before = bot.toStreamer.length;
   let r = await jsonOf(await admin('auto-run', {}));
   assert.equal(r.ok, true);
+  const altSync = bot.toStreamer.slice(before).find(x => x.path === 'harvest/alts');
+  assert.ok(altSync && altSync.body.notify === OWNER && altSync.body.alts.map(a => a.name).join() === '小橘', '夜里也同步小号');
   let b = bot.toStreamer.at(-1);
   assert.equal(b.path, 'auto/start');
   assert.deepEqual(b.body.sources, { VmoMusic: 0, yinyue555: 0 });
@@ -1092,7 +1126,7 @@ await t('夜里自动搬：叫醒流式服务，带上每个频道上次看到�
   r = await jsonOf(await admin('auto-run', {}));
   assert.deepEqual([r.ok, r.why], [false, 'still running']);
   assert.equal(bot.toStreamer.at(-1).path, 'auto/status');
-  assert.equal(bot.toStreamer.length, n + 1);
+  assert.deepEqual(bot.toStreamer.slice(n).map(x => x.path), ['netease/session', 'harvest/alts', 'auto/status'], '来源频道还在搬，小号照样同步');
 });
 
 await t('频道主的菜单：常驻按钮和 / 命令（只设给频道主），点了等于发对应的文字；听众看不到', async () => {

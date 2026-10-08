@@ -88,8 +88,8 @@ def test_netease_user_homepage_is_the_musician_and_counting(monkeypatch):
     http = FakeHttp(pages)
     home = 'https://music.163.com/#/user/home?id=77'
     assert [t.title for t in collect(NetEase(NE), home, http)] == ['新歌', '旧歌', '新歌']
-    assert asyncio.run(NetEase(NE).describe(home, http)) == ('artist', '小橘')
-    assert asyncio.run(NetEase(NE).describe('https://music.163.com/album?id=5', http)) == ('album', '晴天')
+    assert asyncio.run(NetEase(NE).describe(home, http)) == ('artist', '小橘', '9'), '用户主页换成他的歌手编号'
+    assert asyncio.run(NetEase(NE).describe('https://music.163.com/album?id=5', http)) == ('album', '晴天', '5')
     with pytest.raises(ValueError, match='不是音乐人'):
         collect(NetEase(NE), 'https://music.163.com/#/user/home?id=78', http)
 
@@ -357,6 +357,70 @@ def test_netease_login_sends_the_qr_and_keeps_the_cookie_for_the_worker(monkeypa
     assert c.get('/netease/session', headers={'X-Key': 'k1'}).json()['cookie'] == 'MUSIC_U=secret' 
 
 
+def test_alt_sync_posts_new_songs_without_a_sheet():
+    sent, said = [], []
+
+    class Alt(Site):
+        def __init__(self, songs):
+            self.songs = songs
+
+        async def items(self, url, limit, http):
+            for t in self.songs[url][:limit]:
+                yield t
+
+        async def download(self, t, http, cookie):
+            if t.title == '下架':
+                raise UploadError('网易云不给下载（下架了，或者要单独购买）')
+            return Track(t.title, t.artist, 'http://cdn/' + t.sid + '?' + cookie, t.page_url, sid=t.sid)
+
+    async def fake_publish(t, *, http, send):
+        sent.append((t.title, t.audio_url, await send(b'', 'f.mp3', t.title, t.artist, 1, 'c')))
+        return len(sent)
+
+    async def send(*a, channel=''):
+        return channel or 'official'
+
+    async def say(chat, text, buttons=None):
+        said.append((chat, text, buttons))
+
+    site = Alt({'u1': [Track('甲', '小橘', '', 'p1', sid='1'), Track('旧歌', '小橘', '', 'p2', sid='2'), Track('甲', '小橘', '', 'p1', sid='1')],
+                'u2': [Track('下架', '朋友', '', 'p3', sid='3'), Track('乙', '朋友', '', 'p4', sid='4')]})
+
+    async def main():
+        h = Harvester(http=None, send=send, say=say, sleep=lambda n: asyncio.sleep(0), publish_fn=fake_publish)
+        h.check_url = lambda *a: (site, None)
+        h.start_direct([{'url': 'u1', 'name': '小橘'}, {'url': 'u2', 'name': '朋友'}], SETTINGS, [('旧歌', '小橘')],
+                       notify=9, cookie='MUSIC_U=x')
+        busy = h.busy_text()
+        with pytest.raises(RuntimeError):
+            h.start_direct([{'url': 'u1', 'name': '小橘'}], SETTINGS, [])
+        await h.task
+        return h, busy
+
+    h, busy = asyncio.run(main())
+    assert busy.startswith('正在同步小号')
+    assert sent == [('甲', 'http://cdn/1?MUSIC_U=x', 'official'), ('乙', 'http://cdn/4?MUSIC_U=x', 'official')], '不出审核单，库里有的、重复的不发'
+    assert said[0][0] == 9 and said[0][2] is None
+    text = said[0][1]
+    assert text.startswith('👥 同步小号「小橘、朋友」：新歌 3 首，发进频道 2 首，没发 1 首')
+    assert '下架：网易云不给下载' in text and h.sheets == {}
+
+
+def test_alt_sync_with_nothing_new():
+    said = []
+
+    async def say(chat, text, buttons=None):
+        said.append(text)
+
+    async def main():
+        h = Harvester(http=None, send=None, say=say)
+        h.check_url = lambda *a: (Site([Track('旧歌', '小橘', '', 'p')]), None)
+        h.start_direct([{'url': 'u', 'name': '小橘'}], SETTINGS, [('旧歌', '小橘')], notify=9)
+        await h.task
+    asyncio.run(main())
+    assert said == ['👥 同步小号「小橘」：没有新歌（小橘音乐里已有 1 首）']
+
+
 def test_rejecting_a_sheet_posts_nothing():
     async def reject(h):
         sid = h.state['review_id']
@@ -430,6 +494,10 @@ def test_harvest_endpoints(monkeypatch):
     assert c.get('/harvest/status', headers=key).json() == {'status': 'idle'}
     assert c.post('/harvest/count', json={'url': 'https://music.example.com/x', 'settings': SETTINGS}, headers=key).json()['detail'] == '这个网站还不支持'
     assert c.post('/harvest/count', json={'url': 'x'}).status_code == 403
+    assert c.post('/harvest/describe', json={'url': 'https://music.example.com/x', 'settings': SETTINGS}, headers=key).json()['detail'] == '这个网站还不支持'
+    assert c.post('/harvest/alts', json={'alts': []}, headers=key).status_code == 400
+    r = c.post('/harvest/alts', json={'alts': [{'url': 'https://music.example.com/x', 'name': '甲'}], 'settings': SETTINGS}, headers=key)
+    assert r.status_code == 400 and r.json()['detail'] == '甲：这个网站还不支持'
     assert c.get('/harvest/review/abcdefghijklmn', headers=key).status_code == 404
     assert c.get('/harvest/review/abcdefghijklmn').status_code == 403
     r = c.post('/harvest/review', json={'id': 'abcdefghijklmn', 'ok': True}, headers=key)

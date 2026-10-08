@@ -1221,7 +1221,9 @@ const HELP = `我是小橘音乐的管理助手 🍊 常用的点下面的按钮
 搬 @频道名 100 —— 从这个频道搬 100 首中文歌（查重），搬完告诉你
 找 歌名 —— 在小橘音乐里找这首，可以加进/移出歌单、删除
 统计 —— 歌库和这几天搬歌的情况
-贴一个网易云网址 —— 抓里面的歌（单曲、歌单、专辑、歌手主页、用户主页、App 分享链接都行），先列给你过目，确认是我们的歌点通过才发进频道；专辑、歌单、主页会先告诉你一共几首、已有几首，点按钮选抓多少；后面直接加数量就不问了，比如「网址 30」
+贴网易云主页链接（歌手主页、音乐人的用户主页） —— 记成小号：它的新歌不用你过目，直接发进频道（和小橘视频的小号一样）
+小号 —— 看加了哪些小号；「同步小号」现在把所有小号抓一遍；「删除小号 2」删第 2 个；每天凌晨 3 点自动同步
+贴专辑、歌单、单曲链接 —— 抓里面的歌，先列给你过目，确认是我们的歌点通过才发进频道；专辑、歌单会先告诉你一共几首、已有几首，点按钮选抓多少；后面直接加数量就不问了，比如「网址 30」
 爬 歌名或歌手 —— 不用网址，直接去网易云搜着抓，一样先列给你过目；可以加数量，比如「爬 小橘 30」
 搬运设置 —— 每次抓几首、搬到哪个歌单、先发到测试频道还是正式频道
 网易云登录 —— 扫码登录小橘音乐的网易云会员账号，VIP 歌才下得到；会员过期了续上再发一次
@@ -1235,22 +1237,23 @@ const PUBLIC_HELP = `你好，这里是小橘音乐 🍊
 const tooLong = s => s.length > 60;
 // 频道主的菜单：输入框下面常驻的按钮（点了等于发对应的文字），和左下角「菜单」里的 / 命令
 const OWNER_KEYBOARD = {
-  keyboard: [['📈 统计', '🎵 搬运设置'], ['❓ 帮助']],
+  keyboard: [['📈 统计', '🎵 搬运设置'], ['👥 小号', '❓ 帮助']],
   resize_keyboard: true, is_persistent: true,
 };
 
 const OWNER_COMMANDS = [
   ['stats', '📈 歌库和搬歌统计'],
   ['harvest', '🎵 搬运设置'],
+  ['alts', '👥 小号'],
   ['help', '❓ 全部功能'],
 ];
 
 const OWNER_ALIAS = {
-  '📈 统计': '统计', '🎵 搬运设置': '搬运设置', '❓ 帮助': '帮助',
-  '/stats': '统计', '/harvest': '搬运设置',
+  '📈 统计': '统计', '🎵 搬运设置': '搬运设置', '👥 小号': '小号', '❓ 帮助': '帮助',
+  '/stats': '统计', '/harvest': '搬运设置', '/alts': '小号',
 };
 
-const COMMANDS_VERSION = '3';
+const COMMANDS_VERSION = '4';
 
 
 // 频道主的「菜单」命令只设给频道主自己看（听众那边不变）；版本变了才重设
@@ -1290,9 +1293,14 @@ async function botUpdate(env, update, origin) {
       if (!c[1]) return say(env, chat, '爬什么？发「爬 歌名或歌手」，比如「爬 小橘 30」');
       return ownerHarvest(env, chat, { query: c[1].slice(0, 60) }, c[2] ? Number(c[2]) : 0, origin);
     }
-    if ((c = /(https?:\/\/\S+)(?:\s+(\d{1,3}))?/.exec(t))) {
-      return c[2] ? ownerHarvest(env, chat, { url: c[1] }, Number(c[2]), origin) : harvestCount(env, chat, c[1], origin);
+    if ((c = /(https?:\/\/\S+)(?:\s+(\d{1,3}))?/.exec(t))) return ownerLink(env, chat, c[1], c[2] ? Number(c[2]) : 0, origin);
+    if (t === '小号') return say(env, chat, await altsText(env));
+    if (t === '同步小号') {
+      const alts = await getAlts(env);
+      if (!alts.length) return say(env, chat, '还没加小号：把小号的网易云主页链接发给我。');
+      return syncAlts(env, chat, alts);
     }
+    if ((c = /^删除小号\s*(\d+)$/.exec(t))) return deleteAlt(env, chat, Number(c[1]));
     if (/^搬运设置$/.test(t)) return showHarvest(env, chat);
     if ((c = /^搬运数量\s*(\d{1,3})$/.exec(t))) return setHarvestLimit(env, chat, Number(c[1]));
     if ((c = /^搬运歌单\s*(.+)$/.exec(t))) return setHarvestPlaylist(env, chat, c[1].trim());
@@ -1597,6 +1605,83 @@ async function ownerHarvest(env, chat, what, n, origin) {
   return say(env, chat, `${what.query ? `开始在${where}搜「${what.query}」` : `开始从${where}抓`}，最多 ${settings.limit} 首。抓完发审核单给你，确认是我们的歌点通过才发进频道 👌`);
 }
 
+// ── 小号：频道主发的网易云主页（歌手主页、音乐人的用户主页）。和小橘视频的小号一样：新歌不用审核，直接发进频道 ──
+// config 的 neteaseAlts：[{id（歌手编号）, name, url, at}]
+
+async function getAlts(env) {
+  return JSON.parse((await lib(env).getConfig('neteaseAlts')) || '[]');
+}
+
+async function altsText(env) {
+  const alts = await getAlts(env);
+  if (!alts.length) return '还没加小号。把小号的网易云主页链接（歌手主页，或音乐人的用户主页）发给我就加上。';
+  return ['你的小号（新歌不用审核，直接发进频道）：',
+    ...alts.map((a, i) => `${i + 1}. ${a.name || '歌手 ' + a.id}\n   ${a.url}`),
+    '', '「同步小号」现在抓一遍；「删除小号 2」删第 2 个；每天凌晨 3 点自动同步'].join('\n');
+}
+
+async function deleteAlt(env, chat, n) {
+  const alts = await getAlts(env);
+  const [gone] = alts.splice(n - 1, 1);
+  if (!gone) return say(env, chat, '没有这个编号，发「小号」看列表。');
+  await lib(env).setConfig('neteaseAlts', JSON.stringify(alts));
+  return say(env, chat, `删掉了小号「${gone.name || gone.id}」，以后不再抓它。已经发进频道的不动。`);
+}
+
+// 同步这些小号：交给流式服务，新歌直接发（发到搬运设置里的频道，默认正式频道），发完它私聊频道主
+async function syncAlts(env, chat, alts) {
+  if (!streamerOn(env)) return say(env, chat, '搬运服务没配置');
+  const L = lib(env), h = await L.getHarvest();
+  let r;
+  try {
+    r = await streamerCall(env, '/harvest/alts', {
+      alts: alts.map(a => ({ url: a.url, name: a.name })), settings: { ...h, sites: Object.keys(HARVEST_SITES) },
+      existing: (await L.listTracks()).map(t => [t.title, t.artist]), notify: chat,
+      channel: h.channel, cookie: (await neteaseAccount(env)).cookie || '',
+    });
+  } catch {
+    r = { status: 0, data: {} };
+  }
+  const names = alts.map(a => a.name || a.id).join('、');
+  if (r.status === 200) {
+    return say(env, chat, `开始同步小号「${names}」：库里没有的新歌直接发进${h.channel ? `测试频道 @${h.channel}` : '频道'}，不用审核，发完告诉你。`);
+  }
+  if (r.status === 409 && r.data.detail && r.data.detail.busy) {
+    return say(env, chat, `上一单还没做完：${r.data.detail.busy}。做完会通知你，到时发「同步小号」。`);
+  }
+  if (r.status === 400) return say(env, chat, `同步不了：${r.data.detail || '网址不对'}`);
+  return say(env, chat, '搬运服务正在唤醒，过一两分钟再发「同步小号」');
+}
+
+// 频道主贴了一个网址：主页 → 记成小号并马上同步；专辑、歌单（没写数量）→ 先数一数；其他 → 抓了出审核单
+async function ownerLink(env, chat, url, n, origin) {
+  if (!streamerOn(env)) return say(env, chat, '搬运服务没配置');
+  const settings = await lib(env).getHarvest();
+  let r;
+  try {
+    r = await streamerCall(env, '/harvest/describe', { url, settings: { ...settings, sites: Object.keys(HARVEST_SITES) } });
+  } catch {
+    return say(env, chat, '搬运服务正在唤醒，过一两分钟再发一次网址');
+  }
+  if (r.status === 400) return ownerHarvest(env, chat, { url }, n, origin);  // 不支持之类：原样走一遍，报同样的原因
+  if (r.status !== 200) return say(env, chat, r.status === 409 ? '搬运服务正在启动，过一两分钟再发一次' : '搬运服务正在唤醒，过一两分钟再发一次网址');
+  const d = r.data || {};
+  if (d.kind === 'artist' && d.id) {
+    const L = lib(env), alts = await getAlts(env);
+    let alt = alts.find(a => String(a.id) === String(d.id));
+    const fresh = !alt;
+    if (fresh) {
+      alt = { id: String(d.id), name: d.name || '', url: `https://music.163.com/artist?id=${d.id}`, at: Date.now() };
+      alts.push(alt);
+      await L.setConfig('neteaseAlts', JSON.stringify(alts));
+    }
+    await say(env, chat, fresh ? `👥 加了小号「${alt.name || alt.id}」（第 ${alts.length} 个）。以后它的新歌不用审核，直接发进频道。` : `👥 「${alt.name || alt.id}」已经是小号了，现在同步一遍。`);
+    return syncAlts(env, chat, [alt]);
+  }
+  if (n || d.kind === 'song') return ownerHarvest(env, chat, { url }, n, origin);
+  return harvestCount(env, chat, url, origin);
+}
+
 // 贴了专辑、歌单、歌手主页、用户主页的网址（没写数量）：先请流式服务数一数一共几首、库里已有几首，按按钮再抓。
 // 单曲直接抓；数不了（服务在睡、太慢）就照旧直接抓
 const KIND_NAME = { album: '专辑', playlist: '歌单', artist: '歌手主页' };
@@ -1707,6 +1792,10 @@ async function nightly(env) {
     if (!up) await new Promise(res => setTimeout(res, 20000));
   }
   if (!up) return { ok: false, why: 'streamer asleep' };
+  const alts = await getAlts(env), owner = await ownerId(env);
+  if (alts.length && owner) {  // 小号：新歌直接发（和来源频道的自动搬是两件事，互不耽误）
+    try { await syncAlts(env, owner, alts); } catch {}
+  }
   const auto = await L.getAuto();
   const { data: st } = await streamerCall(env, '/auto/status');
   if (st.status === 'running') return { ok: false, why: 'still running' };

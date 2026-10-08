@@ -803,6 +803,48 @@ async def harvest_start(request: Request):
         raise HTTPException(409, {'busy': harvester.busy_text()})
     return {'ok': True, 'site': harvester.state.get('site')}
 
+@app.post('/harvest/describe')
+async def harvest_describe(request: Request):
+    """{url, settings} → {site, kind, name, id}：这个网址是什么（单曲 / 专辑 / 歌单 / 歌手主页），不数歌，很快。不支持 → 400"""
+    check_key(request)
+    if harvester is None:
+        raise HTTPException(409, 'not ready')
+    body = await request.json()
+    url = str(body.get('url') or '').strip()
+    if not re.match(r'^https?://', url):
+        raise HTTPException(400, '不是网址')
+    adapter, why = harvester.check_url(url, body.get('settings') or {})
+    if adapter is None:
+        raise HTTPException(400, why)
+    try:
+        kind, name, sid = await adapter.describe(url, Http(gap=0.2))
+    except ValueError as e:
+        raise HTTPException(400, str(e))
+    return {'site': adapter.name, 'kind': kind, 'name': name, 'id': sid}
+
+@app.post('/harvest/alts')
+async def harvest_alts(request: Request):
+    """{alts: [{url, name}], settings, existing, notify, channel, cookie}：同步小号，新歌不审核直接发。正在忙 → 409"""
+    check_key(request)
+    if harvester is None:
+        raise HTTPException(409, 'not ready')
+    body = await request.json()
+    alts = [{'url': str(a.get('url') or ''), 'name': str(a.get('name') or '')} for a in body.get('alts') or [] if isinstance(a, dict)]
+    if not alts:
+        raise HTTPException(400, '没有小号')
+    channel = str(body.get('channel') or '').lstrip('@')
+    if channel and not re.match(r'^\w{4,64}$', channel):
+        raise HTTPException(400, 'bad channel')
+    existing = [(str(t), str(a)) for t, a in body.get('existing', [])]
+    try:
+        harvester.start_direct(alts, body.get('settings') or {}, existing, notify=body.get('notify') or None,
+                               channel=channel, cookie=str(body.get('cookie') or ''))
+    except ValueError as e:
+        raise HTTPException(400, str(e))
+    except RuntimeError:
+        raise HTTPException(409, {'busy': harvester.busy_text()})
+    return {'ok': True}
+
 @app.post('/harvest/count')
 async def harvest_count(request: Request):
     """{url, settings, existing} → {site, kind, name, total, have}：抓之前先数一数（不出审核单）。网址不支持 → 400"""

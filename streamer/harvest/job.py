@@ -26,6 +26,7 @@ def song_key(t):
 
 
 KEEP_SHEETS = 20  # 内存里最多留几张审核单（旧的丢掉）
+ALT_MOST = 300    # 同步小号一次最多发几首新歌（剩下的下次同步接着发）
 
 
 def sheet_id():
@@ -70,6 +71,10 @@ class Harvester:
         st = self.state
         if st.get('kind') == 'post':
             return f'正在把审核通过的 {st["total"]} 首发进频道（已发 {st["copied"]} 首，处理到第 {len(st["results"])} 首）'
+        if st.get('kind') == 'direct':
+            if st['total']:
+                return f'正在同步小号：{st["total"]} 首新歌发进频道（已发 {st["copied"]} 首，处理到第 {len(st["results"])} 首）'
+            return '正在同步小号：在找新歌'
         what = f'搜「{st["query"]}」' if st.get('query') else '抓上一个网址'
         return f'正在{what}的歌、凑审核单（已看了 {len(st.get("results") or [])} 首）'
 
@@ -91,12 +96,51 @@ class Harvester:
         if adapter is None:
             raise ValueError(why)
         http = http or self.http
-        kind, name = await adapter.describe(url, http) if hasattr(adapter, 'describe') else ('', '')
+        kind, name, _ = await adapter.describe(url, http) if hasattr(adapter, 'describe') else ('', '', '')
         seen = {norm(t) + '|' + norm(a) for t, a in existing}
         keys = set()
         async for t in adapter.items(url, most, http):
             keys.add(song_key(t))  # 同一首重复出现只算一次
         return {'site': adapter.name, 'kind': kind, 'name': name, 'total': len(keys), 'have': len(keys & seen)}
+
+    # ── 小号：频道主亲手加的主页，抓到的新歌不用审核，直接发进频道（和小橘视频的小号一样）──
+
+    def start_direct(self, alts, settings, existing, notify=None, channel='', cookie=''):
+        """alts：[{url, name}]，一个个抓主页，库里没有的新歌（一次最多 ALT_MOST 首）直接发，发完通知频道主"""
+        if self.running():
+            raise RuntimeError('already running')
+        adapters = []
+        for a in alts:
+            adapter, why = self.check_url(a['url'], settings)
+            if adapter is None:
+                raise ValueError(f'{a.get("name") or a["url"]}：{why}')
+            adapters.append((adapter, a))
+        self.state = self._fresh('direct', '', adapters[0][0].name if adapters else '')
+        self.state.update(channel=channel, alts=[a.get('name') or '' for _, a in adapters], have=0)
+        seen = {norm(t) + '|' + norm(a) for t, a in existing}
+        self.task = asyncio.create_task(self._direct(adapters, seen, notify, channel, cookie))
+
+    async def _direct(self, adapters, seen, notify, channel, cookie):
+        st = self.state
+        try:
+            todo, queued = [], set()
+            for adapter, alt in adapters:
+                async for t in adapter.items(alt['url'], 1000, self.http):
+                    k = song_key(t)
+                    if k in seen:
+                        st['have'] += 1
+                    elif k not in queued and len(todo) < ALT_MOST:
+                        queued.add(k)
+                        todo.append((adapter, t))
+            st['total'] = len(todo)
+            await self._post_tracks(todo, seen, channel, cookie)
+            st['status'] = 'done'
+        except asyncio.CancelledError:
+            st['status'] = 'stopped'
+        except Exception as e:  # noqa: BLE001
+            log.exception('alt sync failed')
+            st['status'], st['error'] = 'error', f'{type(e).__name__}: {e}'[:200]
+        await self._notify(notify, (self.report(), None))
 
     # ── 抓取：网址里的歌 → 审核单 ──
 
@@ -207,33 +251,8 @@ class Harvester:
     async def _post(self, sheet, seen, notify, channel='', cookie=''):
         st = self.state
         st['total'] = len(sheet['tracks'])
-        download = getattr(sheet.get('adapter'), 'download', None)  # 下载地址要现取的网站
-        send = (lambda *a: self.send(*a, channel=channel)) if channel else self.send
         try:
-            for t in sheet['tracks']:
-                row = {'title': t.title, 'artist': t.artist, 'page': t.page_url}
-                st['results'].append(row)
-                if song_key(t) in seen:  # 审核期间别的方式搬进来了
-                    row['status'], row['reason'] = 'skipped', '小橘音乐里已经有了'
-                    st['skipped'] += 1
-                    continue
-                try:
-                    if download:
-                        t = await download(t, self.http, cookie)
-                    new_id = await self.publish(t, http=self.http, send=send)
-                except UploadError as e:
-                    row['status'], row['reason'] = 'failed', str(e)
-                    continue
-                except Exception as e:  # noqa: BLE001 — 一首出错不影响后面的
-                    log.exception('publish failed')
-                    row['status'], row['reason'] = 'failed', f'{type(e).__name__}: {e}'[:120]
-                    continue
-                seen.add(song_key(t))
-                row['status'], row['id'] = 'copied', new_id
-                st['copied'] += 1
-                if new_id:
-                    st['new_ids'].append(new_id)
-                await self.sleep(self.pause)  # 慢慢发，免得被限流
+            await self._post_tracks([(sheet.get('adapter'), t) for t in sheet['tracks']], seen, channel, cookie)
             st['status'] = 'done'
         except asyncio.CancelledError:
             st['status'] = 'stopped'
@@ -242,18 +261,59 @@ class Harvester:
             st['status'], st['error'] = 'error', f'{type(e).__name__}: {e}'[:200]
         await self._notify(notify, (self.report(), None))
 
+    async def _post_tracks(self, todo, seen, channel, cookie):
+        """[(适配器, 歌)] 一首首发进频道（channel 空＝正式频道），每首的结果记进 state。一首出错不影响后面的"""
+        st = self.state
+        send = (lambda *a: self.send(*a, channel=channel)) if channel else self.send
+        for adapter, t in todo:
+            row = {'title': t.title, 'artist': t.artist, 'page': t.page_url}
+            st['results'].append(row)
+            if song_key(t) in seen:  # 这期间别的方式搬进来了
+                row['status'], row['reason'] = 'skipped', '小橘音乐里已经有了'
+                st['skipped'] += 1
+                continue
+            download = getattr(adapter, 'download', None)  # 下载地址要现取的网站
+            try:
+                if download:
+                    t = await download(t, self.http, cookie)
+                new_id = await self.publish(t, http=self.http, send=send)
+            except UploadError as e:
+                row['status'], row['reason'] = 'failed', str(e)
+                continue
+            except Exception as e:  # noqa: BLE001
+                log.exception('publish failed')
+                row['status'], row['reason'] = 'failed', f'{type(e).__name__}: {e}'[:120]
+                continue
+            seen.add(song_key(t))
+            row['status'], row['id'] = 'copied', new_id
+            st['copied'] += 1
+            if new_id:
+                st['new_ids'].append(new_id)
+            await self.sleep(self.pause)  # 慢慢发，免得被限流
+
     def report(self):
         st = self.state
         rows = st['results']
         crawl = st.get('kind') == 'crawl'
-        if st['status'] == 'error':
+        where = f'测试频道 @{st["channel"]}' if st.get('channel') else '频道'
+        if st.get('kind') == 'direct':
+            names = '、'.join(n for n in st.get('alts', []) if n)
+            head = f'👥 同步小号{"「" + names + "」" if names else ""}：'
+            if st['status'] == 'error':
+                head += f'出错了：{st["error"]}（已发 {st["copied"]} 首）'
+            elif not st['total']:
+                head += f'没有新歌（小橘音乐里已有 {st["have"]} 首）'
+            else:
+                head += f'新歌 {st["total"]} 首，发进{where} {st["copied"]} 首' + (f'，没发 {st["total"] - st["copied"]} 首' if st['total'] > st['copied'] else '') + (
+                    f'（还有更多，下次同步接着发）' if st['total'] >= ALT_MOST else '')
+        elif st['status'] == 'error':
             head = f'⚠️ 出错了：{st["error"]}' + ('' if crawl else f'（已发 {st["copied"]} 首）')
         elif not rows:
             head = f'在{st["site"]}没搜到「{st["query"]}」' if st.get('query') else '这个网址里没找到歌'
         elif crawl:
             head = f'📥 从{st["site"]}' + (f'搜「{st["query"]}」' if st.get('query') else '') + f'抓到 {st["review"]} 首，等你审核（审核单另发）' + (f'，跳过 {st["skipped"]} 首' if st['skipped'] else '')
         else:
-            head = f'📥 审核通过的发进' + (f'测试频道 @{st["channel"]}' if st.get('channel') else '频道') + f' {st["copied"]} 首' + (f'，没发 {len(rows) - st["copied"]} 首' if len(rows) > st['copied'] else '')
+            head = f'📥 审核通过的发进{where} {st["copied"]} 首' + (f'，没发 {len(rows) - st["copied"]} 首' if len(rows) > st['copied'] else '')
         lines = [head]
         done = [r for r in rows if r.get('status') == 'copied']
         if done:

@@ -67,7 +67,7 @@ class NetEase:
         return kind, sid
 
     async def describe(self, url, http):
-        """数歌之前先看这是什么：→ (类型, 名字)。类型：song 单曲 / album 专辑 / playlist 歌单 / artist 歌手主页"""
+        """先看这是什么：→ (类型, 名字, 编号)。类型：song 单曲 / album 专辑 / playlist 歌单 / artist 歌手主页（用户主页换成歌手）"""
         kind, sid = await self._parse(url, http)
         name = ''
         if kind == 'artist':
@@ -76,7 +76,7 @@ class NetEase:
             name = ((await self._get(http, '/album', id=sid)).get('album') or {}).get('name') or ''
         elif kind == 'playlist':
             name = ((await self._get(http, '/playlist/detail', id=sid)).get('playlist') or {}).get('name') or ''
-        return kind, _text(name)
+        return kind, _text(name), sid
 
     async def items(self, url, limit, http):
         """支持单曲、歌单、专辑、歌手主页、用户主页（song / playlist / album / artist / user/home?id=…，
