@@ -12,16 +12,23 @@ jobs:
           CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
           CLOUDFLARE_ACCOUNT_ID: aca35ff5f62ae4208757219dbc3b489b
         run: |
-          sleep 40   # 等 Worker 部署好
           timeout 150 wrangler tail xiaoju-music --format json > tail.jsonl 2> tail.err || true
           grep -v "^\s*$" tail.err | tail -5 | cut -c1-200
           python3 - <<'PY'
           import json, re
           n = 0
-          for line in open('tail.jsonl', encoding='utf-8'):
-              try: e = json.loads(line)
-              except Exception: continue
-              ev = e.get('event') or {}
+          text, dec, i, items = open('tail.jsonl', encoding='utf-8').read(), json.JSONDecoder(), 0, []
+          while True:
+              j = text.find('{', i)
+              if j < 0: break
+              try:
+                  obj, i = dec.raw_decode(text, j)
+                  items.append(obj)
+              except Exception:
+                  i = j + 1
+          for e in items:
+              if not isinstance(e, dict): continue
+              ev = e.get('event') if isinstance(e.get('event'), dict) else {}
               if 'cron' not in ev: continue
               n += 1
               logs = [re.sub(r'MUSIC_U=[^;" ]+', 'MUSIC_U=<redacted>', ' '.join(map(str, l.get('message') or [])))[:600] for l in e.get('logs') or []]
