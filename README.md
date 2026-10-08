@@ -74,8 +74,8 @@ Worker 先回 `503` + `Retry-After`，播放页提示「正在唤醒」并每 10
 
 **搬来的歌**：帖子说明里有「来源：https://music.163.com/song?id=…」的，直接按这个编号取网易云的歌词，不用模糊搜。
 
-**后台补全**：Worker 的定时任务每分钟一次（`* * * * *`，`fillMissing`）随机挑 8 首还没有封面的、8 首还没找过歌词（或到了再找时间）的歌，
-先找好存起来，打开时直接就有；连着出错 3 次就停，下一分钟接着来。频道主私聊机器人发「补封面」（用着频道图片、或记成没有封面的歌
+**后台补全**：Worker 的定时任务每 5 分钟一次（`*/5 * * * *`，`fillMissing`）按消息号顺序看接下来的 8 首（config 的 `fillCursor` 记着看到哪了，看到头再从头来），
+其中还没有封面的、还没找过歌词（或到了再找时间）的先找好存起来，打开时直接就有；连着出错 3 次就停，下一轮接着来。频道主私聊机器人发「补封面」（用着频道图片、或记成没有封面的歌
 清掉封面，后台重新找，先找网易云的专辑封面）、「补歌词」（确定没有、只有文字的歌后台马上再找一次；手动配的不动）；「统计」里有封面、
 歌词各有多少、还剩几首在后台找。
 
@@ -240,19 +240,19 @@ Space 的 `Dockerfile`、`requirements.txt` 归视频仓库管：音乐要加新
   取，比存着的新就存进 config 的 `netease`（Space 重启了也还在）；审核通过时 Worker 把它带给 `/harvest/review`，
   发帖前才用它取下载地址（`/song/url/v1`，320k）。只给试听片段（会员过期）或不给地址的那首不发，报原因。
   看广告领的会员 `vipType` 显示 0，但照样能下 VIP 歌（2026 年 10 月试过，VIP 歌给 128k）；会员几小时到一天就过期，过期了在 App 里续上。
-- **自检**：Worker 每分钟的定时任务里每小时跑一次（`selfCheck`；频道主私聊机器人发「自检」现在跑）：请流式服务 `POST /netease/check`
+- **自检**：Worker 每 5 分钟的定时任务里每小时跑一次（`selfCheck`；频道主私聊机器人发「自检」现在跑）：请流式服务 `POST /netease/check`
   用存着的网易云账号查登录状态、试下载第一个小号热门歌的前 3 首（完整还是试听）、看频道主账号能不能往频道发帖。结果存在 config 的
   `health`，「搬运设置」里显示；流式服务把结果（不含 cookie）写进日志，看 Space 日志就能排查。
 - **夜里自动搬**：Worker 的定时任务 `0 19 * * *`（北京时间凌晨 3 点）跑 `nightly`：叫醒流式服务，读上一晚
   `/auto/status`，把每个来源频道「看到的最大消息号」合进 config 的 `auto.state`，再 `/auto/start`：每个频道只看
   比上次新的帖子（`min_id`），最多 30 首；第一次只看最新 10 首；禁止转发、出错的频道跳过。搬完机器人私聊频道主。
   手动跑一次：`POST /admin/api/auto-run`；看记录：`GET /admin/api/auto-state`。
-  定时任务有两个：`0 19 * * *`（夜里自动搬、同步小号）和 `* * * * *`（后台补封面、歌词）。Actions 里的 **Deploy worker** 每次部署都会设好；
+  定时任务有两个：`0 19 * * *`（夜里自动搬、同步小号）和 `*/5 * * * *`（后台补封面、歌词）。Actions 里的 **Deploy worker** 每次部署都会设好；
   手动设：
 
   ```bash
   curl -X PUT "https://api.cloudflare.com/client/v4/accounts/$ACC/workers/scripts/xiaoju-music/schedules" \
-    -H "Authorization: Bearer $CLOUDFLARE_API_TOKEN" -H "Content-Type: application/json" -d '[{"cron":"0 19 * * *"},{"cron":"* * * * *"}]'
+    -H "Authorization: Bearer $CLOUDFLARE_API_TOKEN" -H "Content-Type: application/json" -d '[{"cron":"0 19 * * *"},{"cron":"*/5 * * * *"}]'
   ```
 
 ## 限制

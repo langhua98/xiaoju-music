@@ -34,6 +34,6 @@ new_sqlite_classes = ["Library"]
 #   wrangler secret put ADMIN_KEY
 #   wrangler secret put STREAMER_KEY
 
-# 每天北京时间凌晨 3 点（UTC 19:00）：自动去来源频道搬新歌、同步小号；每分钟：后台补封面、歌词
+# 每天北京时间凌晨 3 点（UTC 19:00）：自动去来源频道搬新歌、同步小号；每 5 分钟：后台补封面、歌词
 [triggers]
 crons = ["0 19 * * *", "*/5 * * * *"]

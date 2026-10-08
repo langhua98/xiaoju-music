@@ -89,7 +89,7 @@ class HttpError extends Error {
 export default {
   // 每天北京时间凌晨 3 点（UTC 19:00）：自动去来源频道搬新歌
   async scheduled(controller, env, ctx) {
-    // 每分钟一次：后台补封面、歌词；每天一次（北京时间凌晨 3 点）：夜里自动搬
+    // 每 5 分钟一次：后台补封面、歌词；每天一次（北京时间凌晨 3 点）：夜里自动搬
     if (controller.cron === FILL_CRON) {
       // 结果打进 Worker 日志（wrangler tail / 控制台能看），不含 cookie
       ctx.waitUntil(fillMissing(env).then(r => console.log('fill', JSON.stringify(r)), e => console.log('fill failed', String(e))));
@@ -425,7 +425,7 @@ async function selfCheck(env, force) {
   const last = JSON.parse((await L.getConfig('health')) || '{}');
   if (!force && Date.now() - (last.at || 0) < CHECK_EVERY_MS) return last;
   if (!streamerOn(env)) return last;
-  await L.setConfig('health', JSON.stringify({ ...last, at: Date.now() }));  // 先占住，免得下一分钟又跑一遍
+  await L.setConfig('health', JSON.stringify({ ...last, at: Date.now() }));  // 先占住，免得下一轮又跑一遍
   let r;
   try {
     r = await streamerCall(env, '/netease/check', {
@@ -434,7 +434,7 @@ async function selfCheck(env, force) {
   } catch {
     r = { status: 0 };
   }
-  if (r.status !== 200) {  // 流式服务睡着、还没部署好：不占这一小时，下一分钟再试
+  if (r.status !== 200) {  // 流式服务睡着、还没部署好：不占这一小时，下一轮（5 分钟后）再试
     console.log('self-check: streamer answered', r.status, JSON.stringify(r.data || {}).slice(0, 200));
     await L.setConfig('health', JSON.stringify(last));
     return last;
@@ -461,7 +461,7 @@ function healthLines(h) {
   return lines;
 }
 
-// ── 后台补封面、歌词：每分钟挑一批还没找过（或该再找）的歌先找好存起来，打开时直接就有 ──
+// ── 后台补封面、歌词：每 5 分钟挑一批还没找过（或该再找）的歌先找好存起来，打开时直接就有 ──
 // 每 5 分钟按消息号顺序看下一段 FILL_BATCH 首（记着看到哪了，看到头再从头来）：只读几十行。
 // 别扫全库：免费版 Durable Object 每天只能读 500 万行，每分钟扫全库会把一天的额度用光，整个网站都读不了。
 // 一批不大：免费版 Worker 一次最多 50 个子请求；连着出错（服务睡着、网易云抽风）就停，下一轮接着来
@@ -1494,11 +1494,11 @@ async function botUpdate(env, update, origin) {
     if (t === '补封面') {
       const n = await lib(env).clearNonArtCovers();
       listCache = null;
-      return say(env, chat, `好的，${n} 首没有专辑封面的歌（用着频道图片的、或之前没找到的）后台重新找：先找网易云的专辑封面，找不到再配频道图片。每分钟补一批，不用等人打开；发「统计」看还剩多少。`);
+      return say(env, chat, `好的，${n} 首没有专辑封面的歌（用着频道图片的、或之前没找到的）后台重新找：先找网易云的专辑封面，找不到再配频道图片。每 5 分钟补一批，不用等人打开；发「统计」看还剩多少。`);
     }
     if (t === '补歌词') {
       const n = await lib(env).retryLyrics();
-      return say(env, chat, `好的，${n} 首没歌词或只有文字的歌，后台再去 LRCLIB、网易云找一次（手动配的不动）。每分钟补一批，不用等人打开；发「统计」看还剩多少。`);
+      return say(env, chat, `好的，${n} 首没歌词或只有文字的歌，后台再去 LRCLIB、网易云找一次（手动配的不动）。每 5 分钟补一批，不用等人打开；发「统计」看还剩多少。`);
     }
     if (t === '同步小号') {
       const alts = await getAlts(env);

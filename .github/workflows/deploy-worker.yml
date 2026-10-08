@@ -28,7 +28,7 @@ jobs:
             -F 'page.html=@page.html;type=text/plain' \
             -F 'admin.html=@admin.html;type=text/plain' \
             | python3 -c 'import json,sys; d=json.load(sys.stdin); print("success:", d.get("success"), "| errors:", d.get("errors")); sys.exit(0 if d.get("success") else 1)'
-          # 定时任务（和 wrangler.toml 的 crons 一样）：每天凌晨 3 点夜里自动搬；每分钟后台补封面、歌词
+          # 定时任务（和 wrangler.toml 的 crons 一样）：每天凌晨 3 点夜里自动搬；每 5 分钟后台补封面、歌词
           curl -sS --fail-with-body -X PUT "https://api.cloudflare.com/client/v4/accounts/$ACC/workers/scripts/xiaoju-music/schedules" \
             -H "Authorization: Bearer $CLOUDFLARE_API_TOKEN" -H "Content-Type: application/json" \
             -d '[{"cron":"0 19 * * *"},{"cron":"*/5 * * * *"}]' \
