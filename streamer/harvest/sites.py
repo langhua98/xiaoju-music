@@ -2,13 +2,14 @@
 
 不判断是不是我们的歌（那是频道主在审核单里做的），也不下载上传（那是 upload.py 的事）。
 加新网站：写一个有 key、name、match(url)、items(url, limit, http) 的类，放进 ADAPTERS；
-能按关键词搜的再写 search(query, limit, http)，「爬 关键词」就会用它。"""
+能按关键词搜的再写 search(query, limit, http)，「爬 关键词」就会用它；
+下载地址要发帖时现取（会过期、要登录）的再写 download(track, http, cookie)。"""
 
 import html
-import json
+import os
 import re
-from dataclasses import dataclass
-from urllib.parse import urlencode, urlparse
+from dataclasses import dataclass, replace
+from urllib.parse import urlparse
 
 
 @dataclass
@@ -20,6 +21,7 @@ class Track:
     duration: float = 0   # 秒，不知道就是 0
     size: int = 0         # 字节，不知道就是 0
     ext: str = ''         # 文件扩展名（mp3 / ogg / flac ...）
+    sid: str = ''         # 网站上的编号（适配器有 download() 时，发帖前用它现取下载地址）
 
 
 def _text(v):
@@ -29,14 +31,25 @@ def _text(v):
 
 
 class NetEase:
-    """小橘音乐自己的歌发在网易云上。VIP、下架的歌下载地址会跳到 404 网页，上传时报「网站不给下载」。"""
+    """小橘音乐自己的歌发在网易云上（大多是 VIP 歌）。网易云的接口都经 api-enhanced
+    （NeteaseCloudMusicApiEnhanced，流式服务在本机拉起的 Node 服务，见 app.py 的 netease_api）调用：
+    加密、接口改版它管。VIP 歌要带频道主登录过的网易云账号（cookie）才拿得到下载地址。"""
     key, name = 'netease', '网易云音乐 music.163.com'
-    API = 'https://music.163.com/api'
     HOSTS = ('163cn.tv', 'music.163.com')
+    LEVEL = 'exhigh'  # 320k mp3；无损是 flac，反正要转 mp3
+
+    def __init__(self, api=None):
+        self.api = (api or os.environ.get('NETEASE_API') or 'http://127.0.0.1:3017').rstrip('/')
 
     def match(self, url):
         host = (urlparse(url).hostname or '').lower()
         return any(host == h or host.endswith('.' + h) for h in self.HOSTS)
+
+    async def _get(self, http, path, **params):
+        d = await http.get_json(self.api + path, params)
+        if not isinstance(d, dict) or d.get('code', 200) != 200:
+            raise RuntimeError(f'网易云接口 {path} 出错（code {d.get("code") if isinstance(d, dict) else "?"}）')
+        return d
 
     async def items(self, url, limit, http):
         """支持单曲、歌单、专辑、歌手（song / playlist / album / artist?id=…，网页版带 #/ 的也行），
@@ -48,20 +61,15 @@ class NetEase:
             return
         kind, sid = m.group(1), m.group(2)
         if kind == 'song':
-            songs = await self._details([sid], http)
+            songs = (await self._get(http, '/song/detail', ids=sid)).get('songs') or []
         elif kind == 'album':
-            d = await http.get_json(f'{self.API}/v1/album/{sid}')  # 旧的 /api/album/<id> 现在回 -462（要验证）
-            songs = d.get('songs') or []
+            songs = (await self._get(http, '/album', id=sid)).get('songs') or []
         elif kind == 'playlist':
-            d = await http.get_json(f'{self.API}/v6/playlist/detail', {'id': sid})
-            ids = [str(x['id']) for x in ((d.get('playlist') or {}).get('trackIds') or [])][:limit]
-            songs = []
-            for i in range(0, len(ids), 50):
-                songs += await self._details(ids[i:i + 50], http)
+            songs = (await self._get(http, '/playlist/track/all', id=sid, limit=str(limit), offset='0')).get('songs') or []
         else:  # 歌手：按发布时间从新到旧
             songs, offset = [], 0
             while len(songs) < limit:
-                d = await http.get_json(f'{self.API}/v1/artist/songs', {'id': sid, 'limit': '50', 'offset': str(offset), 'order': 'time'})
+                d = await self._get(http, '/artist/songs', id=sid, order='time', limit='50', offset=str(offset))
                 page = d.get('songs') or []
                 songs += page
                 offset += len(page)
@@ -74,12 +82,8 @@ class NetEase:
         """按关键词（歌名、歌手）搜单曲，网易云排好的顺序。"""
         offset = 0
         while offset < limit:
-            # 不用 /search/get/web：海外请求它只回一串加密的字符串
-            d = await http.get_json(f'{self.API}/search/get', {
-                's': query, 'type': '1', 'limit': str(min(limit - offset, 100)), 'offset': str(offset)})
-            r = d.get('result') or {}
-            if not isinstance(r, dict):
-                raise RuntimeError(f'网易云搜索返回的格式变了（code {d.get("code")}）')
+            r = (await self._get(http, '/cloudsearch', keywords=query, type='1',
+                                 limit=str(min(limit - offset, 100)), offset=str(offset))).get('result') or {}
             page = r.get('songs') or []
             for s in page:
                 yield self._track(s)
@@ -87,18 +91,27 @@ class NetEase:
             if not page or offset >= int(r.get('songCount') or 0):
                 break
 
-    async def _details(self, ids, http):
-        d = await http.get_json(f'{self.API}/song/detail/?' + urlencode({'ids': json.dumps([int(i) for i in ids])}))
-        return d.get('songs') or []
+    async def download(self, track, http, cookie=''):
+        """审核通过、要发帖时才取下载地址（地址几十分钟就过期）。→ 填好 audio_url、size、ext 的 Track。
+        拿不到、或只给试听片段（没登录、会员过期）时抛 UploadError。"""
+        from .upload import UploadError
+        params = {'id': track.sid, 'level': self.LEVEL}
+        if cookie:
+            params['cookie'] = cookie
+        x = ((await self._get(http, '/song/url/v1', **params)).get('data') or [{}])[0]
+        if not x.get('url'):
+            raise UploadError('网易云不给下载' + ('（下架了，或者要单独购买）' if cookie else '（VIP 歌：先发「网易云登录」扫码登录）'))
+        if x.get('freeTrialInfo'):
+            raise UploadError('网易云只给试听片段' + ('（会员过期了？续上再发「网易云登录」）' if cookie else '（VIP 歌：先发「网易云登录」扫码登录）'))
+        return replace(track, audio_url=x['url'], size=int(x.get('size') or 0), ext=(x.get('type') or 'mp3').lower())
 
     def _track(self, s):
         sid = s['id']
-        artist = ' / '.join(a.get('name') or '' for a in (s.get('artists') or s.get('ar') or []) if a.get('name'))
+        artist = ' / '.join(a.get('name') or '' for a in (s.get('ar') or s.get('artists') or []) if a.get('name'))
         return Track(
-            title=_text(s.get('name')) or str(sid), artist=artist,
-            audio_url=f'https://music.163.com/song/media/outer/url?id={sid}.mp3',
+            title=_text(s.get('name')) or str(sid), artist=artist, audio_url='',
             page_url=f'https://music.163.com/song?id={sid}',
-            duration=(s.get('duration') or s.get('dt') or 0) / 1000, ext='mp3',
+            duration=(s.get('dt') or s.get('duration') or 0) / 1000, ext='mp3', sid=str(sid),
         )
 
 

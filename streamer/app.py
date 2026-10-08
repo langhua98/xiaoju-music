@@ -22,13 +22,17 @@ Worker 遇到超过 20 MB 的歌，就把浏览器的 Range 请求转到这里�
 """
 
 import asyncio
+import base64
 import hmac
 import io
+import json
 import logging
 import os
 import re
 import subprocess
 import time
+import urllib.parse
+import urllib.request
 from contextlib import asynccontextmanager
 
 import numpy as np
@@ -44,7 +48,7 @@ from telethon.sessions import StringSession
 
 from harvest.job import Harvester
 from harvest.net import Http
-from harvest.sites import ADAPTERS as HARVEST_SITES
+from harvest.sites import ADAPTERS as HARVEST_SITES, NetEase
 
 # MTProto 每次最多取 512 KB；起点按它对齐，Telegram 才接受
 CHUNK = 512 * 1024
@@ -474,6 +478,25 @@ copier = None
 
 login = None
 
+netease_proc = None  # 本机的 api-enhanced（网易云接口）进程
+
+# api-enhanced（NeteaseCloudMusicApiEnhanced，npm 包 @neteasecloudmusicapienhanced/api）：镜像构建时装好
+NETEASE_API_JS = '/opt/netease-api/node_modules/@neteasecloudmusicapienhanced/api/app.js'
+
+async def start_netease_api(env):
+    """在本机拉起 api-enhanced，只听 127.0.0.1（外面访问不到）。没装就只记日志：贴网址、爬歌用不了，播放不受影响"""
+    global netease_proc
+    js = env.get('NETEASE_API_JS', NETEASE_API_JS)
+    if not os.path.exists(js):
+        log.warning('api-enhanced not installed at %s; NetEase harvesting is off', js)
+        return
+    port = urllib.parse.urlparse(NetEase().api).port or 3017
+    # 它会把请求（含登录 cookie）打进日志，所以丢掉它的输出，只留报错
+    netease_proc = await asyncio.create_subprocess_exec(
+        'node', js, env={**os.environ, 'PORT': str(port), 'HOST': '127.0.0.1'},
+        stdout=asyncio.subprocess.DEVNULL, stderr=None)
+    log.info('api-enhanced starting on 127.0.0.1:%s', port)
+
 def user_music(client):
     async def iter_music(source, min_id=0):
         async for msg in client.iter_messages(source, filter=InputMessagesFilterMusic, min_id=min_id or 0):
@@ -524,6 +547,10 @@ async def lifespan(app):
 
     harvester = Harvester(http=Http(), send=post_audio, say=bot_say)
     log.info('logged in to Telegram as a bot')
+    try:
+        await start_netease_api(env)
+    except Exception:  # noqa: BLE001
+        log.exception('api-enhanced failed to start')
 
     async def fetch_message(channel, message_id):
         return await client.get_messages(channel, ids=message_id)
@@ -561,6 +588,8 @@ async def lifespan(app):
     try:
         yield
     finally:
+        if netease_proc and netease_proc.returncode is None:
+            netease_proc.terminate()
         if copier:
             copier.stop()
         if user_client:
@@ -775,8 +804,56 @@ async def harvest_decide(request: Request):
     if channel and not re.match(r'^\w{4,64}$', channel):
         raise HTTPException(400, 'bad channel')
     result, count = harvester.decide(str(body.get('id', '')), bool(body.get('ok')), existing,
-                                     notify=body.get('notify') or None, channel=channel)
+                                     notify=body.get('notify') or None, channel=channel, cookie=str(body.get('cookie') or ''))
     return {'result': result, 'count': count, 'channel': channel}
+
+# ── 网易云登录：频道主扫码，登录凭证（cookie）交给 Worker 存着，每次审核通过时带过来取 VIP 歌的下载地址 ──
+
+netease_login_task = None
+
+async def netease_login(notify, link, key=None, poll=3.0, wait=180):
+    """二维码发给频道主 → 等他扫码确认 → cookie 交给 Worker（POST {link}/netease-cookie，带流式服务密钥）"""
+    ne, http = NetEase(), Http(gap=0)
+    try:
+        key = key or (await ne._get(http, '/login/qr/key', timestamp=str(time.time_ns())))['data']['unikey']
+        img = (await ne._get(http, '/login/qr/create', key=key, qrimg='true'))['data']['qrimg']
+        f = io.BytesIO(base64.b64decode(img.split(',', 1)[1]))
+        f.name = 'netease-login.png'
+        await bot_client.send_file(int(notify), f, caption='用网易云 App 扫码登录小橘音乐的网易云账号（3 分钟内有效）')
+        for _ in range(int(wait / poll)):
+            await asyncio.sleep(poll)
+            r = await http.get_json(ne.api + '/login/qr/check', {'key': key, 'noCookie': 'true', 'timestamp': str(time.time_ns())})
+            if r.get('code') == 800:
+                break
+            if r.get('code') == 803 and r.get('cookie'):
+                cookie = r['cookie']
+                acc = await http.get_json(ne.api + '/user/account', {'cookie': cookie, 'timestamp': str(time.time_ns())})
+                nick = ((acc.get('profile') or {}).get('nickname')) or ''
+                body = json.dumps({'cookie': cookie, 'nickname': nick}).encode()
+                req = urllib.request.Request(link.rstrip('/') + '/netease-cookie', data=body, method='POST', headers={
+                    'Content-Type': 'application/json', 'X-Key': settings().get('STREAMER_KEY', '')})
+                await asyncio.to_thread(lambda: urllib.request.urlopen(req, timeout=30).read())
+                return await bot_say(notify, f'✅ 网易云已登录：{nick or "（没取到昵称）"}。以后审核通过的 VIP 歌用这个账号下载')
+        await bot_say(notify, '⌛ 二维码过期了，要登录的话再发一次「网易云登录」')
+    except Exception as e:  # noqa: BLE001
+        log.exception('netease login failed')
+        await bot_say(notify, f'⚠️ 网易云登录出错了：{type(e).__name__}')
+
+@app.post('/netease/login')
+async def netease_login_start(request: Request):
+    """{notify, link}：给频道主发网易云登录二维码，扫完把 cookie 交给 Worker。正在等扫码时再发一次就换一张新的"""
+    check_key(request)
+    global netease_login_task
+    if bot_client is None or netease_proc is None:
+        raise HTTPException(409, 'not ready')
+    body = await request.json()
+    link = str(body.get('link') or '')
+    if not re.match(r'^https://', link):
+        raise HTTPException(400, 'bad link')
+    if netease_login_task and not netease_login_task.done():
+        netease_login_task.cancel()
+    netease_login_task = asyncio.create_task(netease_login(body.get('notify'), link))
+    return {'ok': True}
 
 # ── 求歌：听众私聊机器人一个歌名，库里没有时到来源频道里找一首最像的搬进来 ──
 

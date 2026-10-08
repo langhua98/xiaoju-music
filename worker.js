@@ -15,6 +15,7 @@
 //   GET  /l/<消息号>        歌词 JSON：先看数据库；没有就去 LRCLIB、网易云找，找到（或确定没有）就存起来
 //   POST /tg-webhook       Telegram 推送频道新帖，音频自动登记；回复某首歌发的 .lrc 文件就是这首的歌词
 //   GET  /harvest-review/<编号>  贴网址搬运的审核单「查看全部」：抓到的、等频道主确认是不是我们的歌的每一首（编号随机 14 位）
+//   POST /netease-cookie   流式服务交来频道主扫码登录的网易云账号（带流式服务密钥），审核通过时用它取 VIP 歌
 //   GET  /admin            管理页（admin.html，管理密钥登录）：把频道里已删掉的帖子从歌单移除
 //   *    /admin/api/...    管理接口（Authorization: Bearer <ADMIN_KEY>）
 //
@@ -103,6 +104,7 @@ export default {
         return method === 'POST' ? await webhook(request, env, ctx) : text('Method Not Allowed', 405);
       }
       if (path.startsWith('/admin/api/')) return await adminApi(request, env, url);
+      if (path === '/netease-cookie') return method === 'POST' ? await neteaseCookie(request, env) : text('Method Not Allowed', 405);
       if (method !== 'GET' && method !== 'HEAD') return text('Method Not Allowed', 405);
       if (path === '/') return html(PAGE, method);
       if (path === '/admin') return html(ADMIN_PAGE, method, { 'X-Robots-Tag': 'noindex' });
@@ -1224,6 +1226,7 @@ const HELP = `我是小橘音乐的管理助手 🍊 常用的点下面的按钮
 贴一个网易云网址 —— 抓里面的歌（单曲、歌单、专辑、歌手、App 分享链接都行），先列给你过目，确认是我们的歌点通过才发进频道；后面可以加数量，比如「网址 30」
 爬 歌名或歌手 —— 不用网址，直接去网易云搜着抓，一样先列给你过目；可以加数量，比如「爬 小橘 30」
 搬运设置 —— 每次抓几首、搬到哪个歌单、先发到测试频道还是正式频道
+网易云登录 —— 扫码登录小橘音乐的网易云会员账号，VIP 歌才下得到；会员过期了续上再发一次
 直接发歌名 —— 和听众一样找这首歌，库里没有就自动搬进来（新歌按类型自动进歌单）
 `;
 
@@ -1294,6 +1297,7 @@ async function botUpdate(env, update, origin) {
     if ((c = /^搬运数量\s*(\d{1,3})$/.exec(t))) return setHarvestLimit(env, chat, Number(c[1]));
     if ((c = /^搬运歌单\s*(.+)$/.exec(t))) return setHarvestPlaylist(env, chat, c[1].trim());
     if ((c = /^搬运频道\s*(.+)$/.exec(t))) return setHarvestChannel(env, chat, c[1].trim());
+    if (/^网易云登录$/.test(t)) return neteaseLogin(env, chat, origin);
   }
   if (tooLong(t)) return say(env, chat, '歌名太长啦，发短一点（歌名，或者「歌名 歌手」）');
   return songRequest(env, chat, m.from ? m.from.id : chat, t, origin, isOwner);
@@ -1466,12 +1470,13 @@ async function botButton(env, cb, owner, origin) {
 // 抓取只是把歌放进审核单：流式服务凑成一张发给频道主（和小橘视频的审核单一样，整批「通过 / 失败」），通过了才发进频道
 const HARVEST_SITES = { netease: '网易云音乐' };
 
-function harvestPanel(h, env) {
+function harvestPanel(h, env, ne = {}) {
   return {
     text: [
       '搬运设置', '',
       `每次最多抓：${h.limit} 首（发「搬运数量 30」改）`,
       `搬到歌单：${h.playlist || '按类型自动分'}（发「搬运歌单 纯音乐」或「搬运歌单 自动」改）`,
+      `网易云账号：${ne.cookie ? `${ne.nickname || '已登录'}（${new Date(ne.at).toISOString().slice(0, 10)} 登录；VIP 歌下不了就发「网易云登录」重新扫码）` : '没登录，VIP 歌下不了（发「网易云登录」扫码）'}`,
       `发到频道：${h.channel ? `测试频道 @${h.channel}（不进小橘音乐；发「搬运频道 正式」改回）` : `正式频道 @${env.CHANNEL_USERNAME}（发「搬运频道 @测试频道」先发去试）`}`, '',
       `支持：${Object.values(HARVEST_SITES).join('、')}（贴网址，或发「爬 歌名或歌手」去上面搜）。抓到的全部进审核单，你确认是我们自己的歌点「审核通过」才发进频道。`,
     ].join('\n'),
@@ -1479,7 +1484,8 @@ function harvestPanel(h, env) {
 }
 
 async function showHarvest(env, chat) {
-  const p = harvestPanel(await lib(env).getHarvest(), env);
+  const L = lib(env);
+  const p = harvestPanel(await L.getHarvest(), env, JSON.parse((await L.getConfig('netease')) || '{}'));
   return tg(env, 'sendMessage', { chat_id: chat, ...p, disable_web_page_preview: true });
 }
 
@@ -1488,6 +1494,27 @@ async function setHarvestLimit(env, chat, n) {
   h.limit = Math.max(1, Math.min(n, 200));
   await L.setHarvest(h);
   return say(env, chat, `好的，以后每次最多搬 ${h.limit} 首`);
+}
+
+// 网易云登录：流式服务发二维码给频道主，扫完它把 cookie 交到 /netease-cookie 存进 config（不出现在任何响应里）
+async function neteaseLogin(env, chat, origin) {
+  if (!streamerOn(env)) return say(env, chat, '搬运服务没配置');
+  let r;
+  try {
+    r = await streamerCall(env, '/netease/login', { notify: chat, link: origin });
+  } catch {
+    r = { status: 0 };
+  }
+  if (r.status !== 200) return say(env, chat, '搬运服务正在唤醒，过一两分钟再发一次「网易云登录」');
+  return say(env, chat, '网易云登录二维码马上发给你，用网易云 App 扫码确认（用小橘音乐的会员账号）');
+}
+
+async function neteaseCookie(request, env) {
+  if (!env.STREAMER_KEY || !sameString(request.headers.get('X-Key') || '', env.STREAMER_KEY)) return text('Forbidden', 403);
+  const b = await request.json().catch(() => ({}));
+  if (typeof b.cookie !== 'string' || !b.cookie || b.cookie.length > 8000) return text('Bad Request', 400);
+  await lib(env).setConfig('netease', JSON.stringify({ cookie: b.cookie, nickname: String(b.nickname || '').slice(0, 64), at: Date.now() }));
+  return text('ok');
 }
 
 // 审核通过的歌发到哪：测试频道（频道主账号要是那里的管理员；Worker 只登记正式频道的帖子，测试的不进小橘音乐）或正式频道
@@ -1558,6 +1585,7 @@ async function harvestDecide(env, cb, ok, ack) {
   try {
     r = await streamerCall(env, '/harvest/review', {
       id, ok, notify: cb.from.id, channel: (await lib(env).getHarvest()).channel,
+      cookie: ok ? (JSON.parse((await lib(env).getConfig('netease')) || '{}').cookie || '') : '',
       existing: (await lib(env).listTracks()).map(t => [t.title, t.artist]),
     });
   } catch {

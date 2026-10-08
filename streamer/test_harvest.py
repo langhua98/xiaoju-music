@@ -47,59 +47,71 @@ def test_find_adapter():
         assert find_adapter(u) is None, u
 
 
-NE = 'https://music.163.com/api'
+NE = 'http://127.0.0.1:3017'  # 本机的 api-enhanced
 
 
 def ne_song(i, name, artists, ms=200000):
-    return {'id': i, 'name': name, 'artists': [{'name': a} for a in artists], 'duration': ms}
+    return {'id': i, 'name': name, 'ar': [{'name': a} for a in artists], 'dt': ms}
 
 
 def test_netease_song_album_playlist_artist_and_short_link():
     pages = {
-        NE + '/song/detail/?ids=%5B11%5D': {'songs': [ne_song(11, '晴天', ['小橘', '朋友'])]},
-        NE + '/v1/album/5': {'album': {'id': 5}, 'songs': [ne_song(21, '一', ['小橘']), ne_song(22, '二', ['小橘'])]},
-        NE + '/v6/playlist/detail?id=7': {'playlist': {'trackIds': [{'id': 31}, {'id': 32}, {'id': 33}]}},
-        NE + '/song/detail/?ids=%5B31%2C+32%5D': {'songs': [ne_song(31, '甲', ['A']), ne_song(32, '乙', ['B'])]},
-        NE + '/v1/artist/songs?id=9&limit=50&offset=0': {'songs': [ne_song(41, '新歌', ['小橘'])], 'more': True},
-        NE + '/v1/artist/songs?id=9&limit=50&offset=1': {'songs': [ne_song(42, '旧歌', ['小橘'])], 'more': False},
+        NE + '/song/detail?ids=11': {'code': 200, 'songs': [ne_song(11, '晴天', ['小橘', '朋友'])]},
+        NE + '/album?id=5': {'code': 200, 'songs': [ne_song(21, '一', ['小橘']), ne_song(22, '二', ['小橘'])]},
+        NE + '/playlist/track/all?id=7&limit=2&offset=0': {'code': 200, 'songs': [ne_song(31, '甲', ['A']), ne_song(32, '乙', ['B'])]},
+        NE + '/artist/songs?id=9&limit=50&offset=0&order=time': {'code': 200, 'songs': [ne_song(41, '新歌', ['小橘'])], 'more': True},
+        NE + '/artist/songs?id=9&limit=50&offset=1&order=time': {'code': 200, 'songs': [ne_song(42, '旧歌', ['小橘'])], 'more': False},
     }
     http = FakeHttp(pages, redirects={'https://163cn.tv/abc': 'https://y.music.163.com/m/song?id=11&uct2=x'})
-    [t] = collect(NetEase(), 'https://music.163.com/#/song?id=11', http)
-    assert (t.title, t.artist, t.duration, t.ext) == ('晴天', '小橘 / 朋友', 200.0, 'mp3')
-    assert t.audio_url == 'https://music.163.com/song/media/outer/url?id=11.mp3'
-    assert t.page_url == 'https://music.163.com/song?id=11'
-    assert [x.title for x in collect(NetEase(), 'https://163cn.tv/abc', http)] == ['晴天']
-    assert [x.title for x in collect(NetEase(), 'https://music.163.com/album?id=5', http)] == ['一', '二']
-    assert [x.title for x in collect(NetEase(), 'https://music.163.com/#/playlist?id=7', http, limit=2)] == ['甲', '乙']
-    assert [x.title for x in collect(NetEase(), 'https://music.163.com/#/artist?id=9', http)] == ['新歌', '旧歌']
-    assert collect(NetEase(), 'https://music.163.com/#/discover', http) == []
+    [t] = collect(NetEase(NE), 'https://music.163.com/#/song?id=11', http)
+    assert (t.title, t.artist, t.duration, t.sid) == ('晴天', '小橘 / 朋友', 200.0, '11')
+    assert t.page_url == 'https://music.163.com/song?id=11' and t.audio_url == '', '下载地址发帖时才取'
+    assert [x.title for x in collect(NetEase(NE), 'https://163cn.tv/abc', http)] == ['晴天']
+    assert [x.title for x in collect(NetEase(NE), 'https://music.163.com/album?id=5', http)] == ['一', '二']
+    assert [x.title for x in collect(NetEase(NE), 'https://music.163.com/#/playlist?id=7', http, limit=2)] == ['甲', '乙']
+    assert [x.title for x in collect(NetEase(NE), 'https://music.163.com/#/artist?id=9', http)] == ['新歌', '旧歌']
+    assert collect(NetEase(NE), 'https://music.163.com/#/discover', http) == []
+    http = FakeHttp({NE + '/album?id=6': {'code': -462}})
+    with pytest.raises(RuntimeError, match='code -462'):
+        collect(NetEase(NE), 'https://music.163.com/album?id=6', http)
 
 
 def test_netease_search_pages_until_limit_or_end():
-    q = '小橘'  # FakeHttp 不编码
     pages = {
-        NE + f'/search/get?limit=3&offset=0&s={q}&type=1': {'result': {'songCount': 5, 'songs': [
+        NE + '/cloudsearch?keywords=小橘&limit=3&offset=0&type=1': {'code': 200, 'result': {'songCount': 5, 'songs': [
             ne_song(1, '甲', ['小橘']), ne_song(2, '乙', ['小橘'])]}},
-        NE + f'/search/get?limit=1&offset=2&s={q}&type=1': {'result': {'songCount': 5, 'songs': [ne_song(3, '丙', ['小橘'])]}},
-        NE + f'/search/get?limit=100&offset=0&s={q}&type=1': {'result': {'songCount': 2, 'songs': [
+        NE + '/cloudsearch?keywords=小橘&limit=1&offset=2&type=1': {'code': 200, 'result': {'songCount': 5, 'songs': [ne_song(3, '丙', ['小橘'])]}},
+        NE + '/cloudsearch?keywords=小橘&limit=100&offset=0&type=1': {'code': 200, 'result': {'songCount': 2, 'songs': [
             ne_song(1, '甲', ['小橘']), ne_song(2, '乙', ['小橘'])]}},
-        NE + '/search/get?limit=100&offset=0&s=none&type=1': {'result': {'songCount': 0}},
+        NE + '/cloudsearch?keywords=none&limit=100&offset=0&type=1': {'code': 200, 'result': {'songCount': 0}},
     }
 
     def search(query, limit):
         http = FakeHttp(pages)
 
         async def main():
-            return [t.title async for t in NetEase().search(query, limit, http)]
+            return [t.title async for t in NetEase(NE).search(query, limit, http)]
         return asyncio.run(main()), http.asked
 
     assert search('小橘', 3)[0] == ['甲', '乙', '丙'], '一页不够翻下一页，够了就停'
     titles, asked = search('小橘', 150)
     assert titles == ['甲', '乙'] and len(asked) == 1, '搜完了就停'
     assert search('none', 150)[0] == []
-    pages[NE + '/search/get?limit=100&offset=0&s=enc&type=1'] = {'code': 200, 'result': '35b1748964af'}
-    with pytest.raises(RuntimeError, match='格式变了'):
-        search('enc', 150)
+
+
+def test_netease_download_needs_a_full_song_not_a_trial():
+    t = Track('晴天', '小橘', '', 'p', 200, 0, 'mp3', sid='11')
+    url = NE + '/song/url/v1?cookie=MUSIC_U=x&id=11&level=exhigh'
+
+    def dl(page, cookie='MUSIC_U=x'):
+        return asyncio.run(NetEase(NE).download(t, FakeHttp({url if cookie else NE + '/song/url/v1?id=11&level=exhigh': page}), cookie))
+
+    got = dl({'code': 200, 'data': [{'id': 11, 'url': 'http://m701.music.126.net/a.mp3', 'size': 3158561, 'type': 'MP3', 'freeTrialInfo': None}]})
+    assert (got.audio_url, got.size, got.ext, got.title) == ('http://m701.music.126.net/a.mp3', 3158561, 'mp3', '晴天')
+    with pytest.raises(UploadError, match='试听片段（会员过期了'):
+        dl({'code': 200, 'data': [{'id': 11, 'url': 'http://x/a.mp3', 'freeTrialInfo': {'start': 0, 'end': 30}}]})
+    with pytest.raises(UploadError, match='先发「网易云登录」'):
+        dl({'code': 200, 'data': [{'id': 11, 'url': None}]}, cookie='')
 
 
 # ── 上传 ──
@@ -244,6 +256,81 @@ def test_approving_into_a_test_channel():
     asyncio.run(main())
     assert sent == ['xiaoju_test']
     assert said[-1].startswith('📥 审核通过的发进测试频道 @xiaoju_test 1 首')
+
+
+def test_approval_fetches_download_urls_with_the_login_cookie():
+    got, said = [], []
+
+    class Dl(Site):
+        async def download(self, t, http, cookie):
+            if t.title == 'VIP':
+                raise UploadError('网易云只给试听片段')
+            return Track(t.title, t.artist, 'http://cdn/' + t.sid + '?' + cookie, t.page_url, sid=t.sid)
+
+    async def fake_publish(t, *, http, send):
+        got.append(t.audio_url)
+        return 1
+
+    async def say(chat, text, buttons=None):
+        said.append(text)
+
+    async def main():
+        h = Harvester(http=None, send=None, say=say, sleep=lambda n: asyncio.sleep(0), publish_fn=fake_publish)
+        site = Dl([Track('甲', 'A', '', 'p1', sid='1'), Track('VIP', 'A', '', 'p2', sid='2')])
+        h.check_url = lambda *a: (site, None)
+        h.start('https://music.163.com/#/album?id=1', SETTINGS, [], notify=9)
+        await h.task
+        h.decide(h.state['review_id'], True, [], notify=9, cookie='MUSIC_U=x')
+        await h.task
+    asyncio.run(main())
+    assert got == ['http://cdn/1?MUSIC_U=x']
+    assert 'VIP：网易云只给试听片段' in said[-1]
+
+
+def test_netease_login_sends_the_qr_and_hands_the_cookie_to_the_worker(monkeypatch):
+    monkeypatch.setenv('STREAMER_KEY', 'k1')
+    checks = iter([{'code': 801}, {'code': 803, 'cookie': 'MUSIC_U=secret'}])
+
+    class Http:
+        def __init__(self, **kw):
+            pass
+
+        async def get_json(self, url, params=None):
+            path = url.split('3017', 1)[1]
+            if path == '/login/qr/key':
+                return {'code': 200, 'data': {'unikey': 'k'}}
+            if path == '/login/qr/create':
+                assert params['key'] == 'k'
+                return {'code': 200, 'data': {'qrimg': 'data:image/png;base64,UE5H'}}
+            if path == '/login/qr/check':
+                return next(checks)
+            assert path == '/user/account' and params['cookie'] == 'MUSIC_U=secret'
+            return {'code': 200, 'profile': {'nickname': '还是一样i1998'}}
+
+    sent, posted, said = [], [], []
+
+    class Bot:
+        async def send_file(self, chat, f, caption=''):
+            sent.append((chat, f.read()))
+
+        async def send_message(self, chat, text, **kw):
+            said.append(text)
+
+    class Resp:
+        def read(self):
+            return b'ok'
+
+    def urlopen(req, timeout=0):
+        posted.append((req.full_url, req.get_header('X-key'), req.data))
+        return Resp()
+
+    monkeypatch.setattr(appmod, 'Http', Http)
+    monkeypatch.setattr(appmod, 'bot_client', Bot())
+    monkeypatch.setattr(appmod.urllib.request, 'urlopen', urlopen)
+    asyncio.run(appmod.netease_login(9, 'https://w.example/', poll=0.001))
+    assert sent == [(9, b'PNG')]
+    assert posted == [('https://w.example/netease-cookie', 'k1', b'{"cookie": "MUSIC_U=secret", "nickname": "\\u8fd8\\u662f\\u4e00\\u6837i1998"}')]
+    assert said == ['✅ 网易云已登录：还是一样i1998。以后审核通过的 VIP 歌用这个账号下载']
 
 
 def test_rejecting_a_sheet_posts_nothing():

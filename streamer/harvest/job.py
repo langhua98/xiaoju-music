@@ -118,7 +118,7 @@ class Harvester:
         except Exception as e:  # noqa: BLE001
             log.exception('crawl failed')
             st['status'], st['error'] = 'error', f'{type(e).__name__}: {e}'[:200]
-        sheet = self._add_sheet(adapter.name, url, pending, query) if pending else None
+        sheet = self._add_sheet(adapter, url, pending, query) if pending else None
         if sheet:
             st['review'], st['review_id'] = len(pending), sheet['id']
         msgs = [(self.report(), None)]
@@ -129,8 +129,9 @@ class Harvester:
 
     # ── 审核单 ──
 
-    def _add_sheet(self, site, url, tracks, query=''):
-        sheet = {'id': sheet_id(), 'site': site, 'url': url, 'query': query, 'status': 'review', 'tracks': tracks}
+    def _add_sheet(self, adapter, url, tracks, query=''):
+        sheet = {'id': sheet_id(), 'site': adapter.name, 'adapter': adapter, 'url': url, 'query': query,
+                 'status': 'review', 'tracks': tracks}
         self.sheets[sheet['id']] = sheet
         for old in list(self.sheets)[:-KEEP_SHEETS]:
             del self.sheets[old]
@@ -156,10 +157,10 @@ class Harvester:
         return {'id': b['id'], 'site': b['site'], 'url': b['url'], 'query': b.get('query', ''), 'status': b['status'],
                 'tracks': [{'title': t.title, 'artist': t.artist, 'page': t.page_url} for t in b['tracks']]}
 
-    def decide(self, sid, ok, existing, notify=None, channel=''):
+    def decide(self, sid, ok, existing, notify=None, channel='', cookie=''):
         """频道主按了审核单的按钮 → (结果, 首数)。结果：'missing' 没有这张（服务重启过）/ 'done' 已经审过 /
         'busy' 正在抓或发别的，等会儿再点 / 'approved' 开始发 / 'rejected' 不发了。
-        channel：发到这个测试频道（空＝正式频道）"""
+        channel：发到这个测试频道（空＝正式频道）。cookie：频道主登录过的网站账号（取 VIP 歌的下载地址）"""
         b = self.sheets.get(sid)
         if b is None:
             return 'missing', 0
@@ -174,13 +175,14 @@ class Harvester:
         self.state = self._fresh('post', b['url'], b['site'])
         self.state['channel'] = channel
         seen = {norm(t) + '|' + norm(a) for t, a in existing}
-        self.task = asyncio.create_task(self._post(b, seen, notify, channel))
+        self.task = asyncio.create_task(self._post(b, seen, notify, channel, cookie))
         return 'approved', len(b['tracks'])
 
     # ── 通过后：一首首发进频道 ──
 
-    async def _post(self, sheet, seen, notify, channel=''):
+    async def _post(self, sheet, seen, notify, channel='', cookie=''):
         st = self.state
+        download = getattr(sheet.get('adapter'), 'download', None)  # 下载地址要现取的网站
         send = (lambda *a: self.send(*a, channel=channel)) if channel else self.send
         try:
             for t in sheet['tracks']:
@@ -191,6 +193,8 @@ class Harvester:
                     st['skipped'] += 1
                     continue
                 try:
+                    if download:
+                        t = await download(t, self.http, cookie)
                     new_id = await self.publish(t, http=self.http, send=send)
                 except UploadError as e:
                     row['status'], row['reason'] = 'failed', str(e)

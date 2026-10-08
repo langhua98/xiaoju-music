@@ -129,7 +129,7 @@ globalThis.fetch = async (input, init = {}) => {
     return Response.json({ code: 200, lrc: { version: 1, lyric: neteaseLyrics.get(Number(m[1])) || '' } });
   }
   // 机器人要用的流式服务接口：记下收到的请求，按 bot 里设好的回
-  if ((m = url.match(/^https:\/\/streamer\.example\/(fulfill|copy\/start|copy\/pick|auto\/start|auto\/status|search\/global|harvest|harvest\/review(?:\/[a-z0-9]+)?)(?:\?(.*))?$/)) || url === STREAMER + '/') {
+  if ((m = url.match(/^https:\/\/streamer\.example\/(fulfill|copy\/start|copy\/pick|auto\/start|auto\/status|search\/global|harvest|harvest\/review(?:\/[a-z0-9]+)?|netease\/login)(?:\?(.*))?$/)) || url === STREAMER + '/') {
     if (bot.streamerDown) throw new TypeError('fetch failed');
     if (url === STREAMER + '/') return Response.json({ ok: true });
     assert.equal(headers.get('X-Key'), SKEY);
@@ -975,6 +975,24 @@ await t('贴网址搬运的审核单：按通过 / 失败交给流式服务，�
   assert.match(lastSay().text, /频道名不对/);
   await dm(OWNER, '搬运频道 正式');
   assert.equal((await lib.getHarvest()).channel, '');
+
+  // 网易云登录：流式服务发二维码；扫完它把 cookie 交到 /netease-cookie；审核通过时带上
+  await dm(OWNER, '网易云登录');
+  assert.deepEqual(bot.toStreamer.at(-1), { path: 'netease/login', body: { notify: OWNER, link: BASE }, query: '' });
+  assert.match(lastSay().text, /二维码马上发给你/);
+  const cookieReq = (key, body) => req('/netease-cookie', { method: 'POST', headers: { 'X-Key': key, 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
+  assert.equal((await cookieReq('wrong', { cookie: 'MUSIC_U=x' })).status, 403);
+  assert.equal((await cookieReq(SKEY, { cookie: '' })).status, 400);
+  assert.equal((await req('/netease-cookie')).status, 405);
+  assert.equal((await cookieReq(SKEY, { cookie: 'MUSIC_U=secretcookie', nickname: '小橘' })).status, 200);
+  await dm(OWNER, '搬运设置');
+  assert.match(lastSay().text, /网易云账号：小橘（\d{4}-\d\d-\d\d 登录/);
+  assert.ok(!lastSay().text.includes('secretcookie'));
+  await pressSheet(OWNER, 'hv:ok:abcdefghijklmn');
+  assert.equal(bot.toStreamer.at(-1).body.cookie, 'MUSIC_U=secretcookie', '审核通过时带上网易云账号');
+  bot.review = { result: 'rejected', count: 2 };
+  await pressSheet(OWNER, 'hv:no:abcdefghijklmn');
+  assert.equal(bot.toStreamer.at(-1).body.cookie, '', '审核失败不带');
   await dm(OWNER, '搬运设置');
   assert.match(lastSay().text, /发到频道：正式频道 @xiaojumusic/);
   bot.review = approved;
