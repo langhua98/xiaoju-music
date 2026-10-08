@@ -987,8 +987,8 @@ export class Library extends DurableObject {
 
   // 贴网址搬运的设置：每次最多抓几首、放进哪个歌单（空 = 按类型分）。以前存的 sites、licenses 不再用
   async getHarvest() {
-    const { limit = 20, playlist = '' } = JSON.parse(this.cfg('harvest') || '{}');
-    return { limit, playlist };
+    const { limit = 20, playlist = '', channel = '' } = JSON.parse(this.cfg('harvest') || '{}');
+    return { limit, playlist, channel };
   }
 
   async setHarvest(v) { this.setCfg('harvest', JSON.stringify(v)); }
@@ -1223,7 +1223,7 @@ const HELP = `我是小橘音乐的管理助手 🍊 常用的点下面的按钮
 统计 —— 歌库和这几天搬歌的情况
 贴一个网易云网址 —— 抓里面的歌（单曲、歌单、专辑、歌手、App 分享链接都行），先列给你过目，确认是我们的歌点通过才发进频道；后面可以加数量，比如「网址 30」
 爬 歌名或歌手 —— 不用网址，直接去网易云搜着抓，一样先列给你过目；可以加数量，比如「爬 小橘 30」
-搬运设置 —— 每次抓几首、搬到哪个歌单
+搬运设置 —— 每次抓几首、搬到哪个歌单、先发到测试频道还是正式频道
 直接发歌名 —— 和听众一样找这首歌，库里没有就自动搬进来（新歌按类型自动进歌单）
 `;
 
@@ -1293,6 +1293,7 @@ async function botUpdate(env, update, origin) {
     if (/^搬运设置$/.test(t)) return showHarvest(env, chat);
     if ((c = /^搬运数量\s*(\d{1,3})$/.exec(t))) return setHarvestLimit(env, chat, Number(c[1]));
     if ((c = /^搬运歌单\s*(.+)$/.exec(t))) return setHarvestPlaylist(env, chat, c[1].trim());
+    if ((c = /^搬运频道\s*(.+)$/.exec(t))) return setHarvestChannel(env, chat, c[1].trim());
   }
   if (tooLong(t)) return say(env, chat, '歌名太长啦，发短一点（歌名，或者「歌名 歌手」）');
   return songRequest(env, chat, m.from ? m.from.id : chat, t, origin, isOwner);
@@ -1465,19 +1466,20 @@ async function botButton(env, cb, owner, origin) {
 // 抓取只是把歌放进审核单：流式服务凑成一张发给频道主（和小橘视频的审核单一样，整批「通过 / 失败」），通过了才发进频道
 const HARVEST_SITES = { netease: '网易云音乐' };
 
-function harvestPanel(h) {
+function harvestPanel(h, env) {
   return {
     text: [
       '搬运设置', '',
       `每次最多抓：${h.limit} 首（发「搬运数量 30」改）`,
-      `搬到歌单：${h.playlist || '按类型自动分'}（发「搬运歌单 纯音乐」或「搬运歌单 自动」改）`, '',
+      `搬到歌单：${h.playlist || '按类型自动分'}（发「搬运歌单 纯音乐」或「搬运歌单 自动」改）`,
+      `发到频道：${h.channel ? `测试频道 @${h.channel}（不进小橘音乐；发「搬运频道 正式」改回）` : `正式频道 @${env.CHANNEL_USERNAME}（发「搬运频道 @测试频道」先发去试）`}`, '',
       `支持：${Object.values(HARVEST_SITES).join('、')}（贴网址，或发「爬 歌名或歌手」去上面搜）。抓到的全部进审核单，你确认是我们自己的歌点「审核通过」才发进频道。`,
     ].join('\n'),
   };
 }
 
 async function showHarvest(env, chat) {
-  const p = harvestPanel(await lib(env).getHarvest());
+  const p = harvestPanel(await lib(env).getHarvest(), env);
   return tg(env, 'sendMessage', { chat_id: chat, ...p, disable_web_page_preview: true });
 }
 
@@ -1486,6 +1488,22 @@ async function setHarvestLimit(env, chat, n) {
   h.limit = Math.max(1, Math.min(n, 200));
   await L.setHarvest(h);
   return say(env, chat, `好的，以后每次最多搬 ${h.limit} 首`);
+}
+
+// 审核通过的歌发到哪：测试频道（频道主账号要是那里的管理员；Worker 只登记正式频道的帖子，测试的不进小橘音乐）或正式频道
+async function setHarvestChannel(env, chat, name) {
+  const L = lib(env), h = await L.getHarvest();
+  if (name === '正式') {
+    h.channel = '';
+    await L.setHarvest(h);
+    return say(env, chat, `好的，审核通过的歌发进正式频道 @${env.CHANNEL_USERNAME}`);
+  }
+  const m = /^(?:@|https?:\/\/t\.me\/)?(\w{4,64})$/.exec(name);
+  if (!m) return say(env, chat, '频道名不对：发「搬运频道 @频道用户名」，或「搬运频道 正式」');
+  if (m[1].toLowerCase() === String(env.CHANNEL_USERNAME).toLowerCase()) return setHarvestChannel(env, chat, '正式');
+  h.channel = m[1];
+  await L.setHarvest(h);
+  return say(env, chat, `好的，审核通过的歌先发到测试频道 @${m[1]}，不进小橘音乐。频道主账号要是那个频道的管理员。试好了发「搬运频道 正式」改回来`);
 }
 
 async function setHarvestPlaylist(env, chat, name) {
@@ -1539,7 +1557,8 @@ async function harvestDecide(env, cb, ok, ack) {
   let r;
   try {
     r = await streamerCall(env, '/harvest/review', {
-      id, ok, notify: cb.from.id, existing: (await lib(env).listTracks()).map(t => [t.title, t.artist]),
+      id, ok, notify: cb.from.id, channel: (await lib(env).getHarvest()).channel,
+      existing: (await lib(env).listTracks()).map(t => [t.title, t.artist]),
     });
   } catch {
     return ack('搬运服务正在唤醒，过一两分钟再点');
@@ -1548,7 +1567,7 @@ async function harvestDecide(env, cb, ok, ack) {
   if (r.status !== 200 || !result) return ack('搬运服务正在唤醒，过一两分钟再点');
   if (result === 'busy') return ack('正在搬别的网址，等那边搬完再点');
   const line = {
-    approved: `✅ 审核通过：${count} 首开始发进频道，发完告诉你`,
+    approved: `✅ 审核通过：${count} 首开始发进${r.data.channel ? `测试频道 @${r.data.channel}` : '频道'}，发完告诉你`,
     rejected: `❌ 审核失败：${count} 首不发`,
     done: '这张审核单已经审过了',
     missing: '⌛ 这张审核单过期了（搬运服务重启过），要搬的话重新发一次网址',

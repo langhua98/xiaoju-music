@@ -218,6 +218,34 @@ def test_approving_a_sheet_posts_its_tracks():
     assert '· 甲 — A' in said[-1] and '丙：小橘音乐里已经有了' in said[-1] and '丁：下载失败' in said[-1]
 
 
+def test_approving_into_a_test_channel():
+    sent = []
+
+    async def send(*a, channel=''):
+        sent.append(channel)
+        return 1
+
+    async def fake_publish(t, *, http, send):
+        return await send(b'', 'f.mp3', t.title, t.artist, 1, 'c')
+
+    said = []
+
+    async def say(chat, text, buttons=None):
+        said.append(text)
+
+    async def main():
+        h = Harvester(http=None, send=send, say=say, sleep=lambda n: asyncio.sleep(0), publish_fn=fake_publish)
+        site = Site([Track('甲', 'A', 'u1', 'p1')])
+        h.check_url = lambda *a: (site, None)
+        h.start('https://music.163.com/#/song?id=1', SETTINGS, [], notify=9)
+        await h.task
+        assert h.decide(h.state['review_id'], True, [], notify=9, channel='xiaoju_test') == ('approved', 1)
+        await h.task
+    asyncio.run(main())
+    assert sent == ['xiaoju_test']
+    assert said[-1].startswith('📥 审核通过的发进测试频道 @xiaoju_test 1 首')
+
+
 def test_rejecting_a_sheet_posts_nothing():
     async def reject(h):
         sid = h.state['review_id']
@@ -291,7 +319,10 @@ def test_harvest_endpoints(monkeypatch):
     assert c.get('/harvest/review/abcdefghijklmn', headers=key).status_code == 404
     assert c.get('/harvest/review/abcdefghijklmn').status_code == 403
     r = c.post('/harvest/review', json={'id': 'abcdefghijklmn', 'ok': True}, headers=key)
-    assert r.json() == {'result': 'missing', 'count': 0}
+    assert r.json() == {'result': 'missing', 'count': 0, 'channel': ''}
+    r = c.post('/harvest/review', json={'id': 'abcdefghijklmn', 'ok': True, 'channel': '@xiaoju_test'}, headers=key)
+    assert r.json()['channel'] == 'xiaoju_test'
+    assert c.post('/harvest/review', json={'id': 'x', 'ok': True, 'channel': 'bad name!'}, headers=key).status_code == 400
 
 
 def test_bot_say_turns_buttons_into_inline_buttons(monkeypatch):

@@ -511,14 +511,14 @@ async def lifespan(app):
     global bot_client, harvester
     bot_client = client
 
-    async def post_audio(data, filename, title, artist, seconds, text):
+    async def post_audio(data, filename, title, artist, seconds, text, channel=''):
         # 用频道主账号发帖：机器人收不到自己发的帖子，用它发的话 Worker 不会登记。
         # 带上歌名、作者、时长，Telegram 才当成音乐；大文件也能发
         if user_client is None:
             raise RuntimeError('channel owner account not logged in')
         f = io.BytesIO(data)
         f.name = filename
-        sent = await user_client.send_file(target_channel(), f, caption=text, link_preview=False,
+        sent = await user_client.send_file(channel or target_channel(), f, caption=text, link_preview=False,
                                       attributes=[DocumentAttributeAudio(duration=seconds, title=title[:64], performer=artist[:64])])
         return sent.id
 
@@ -764,15 +764,19 @@ async def harvest_sheet(sid: str, request: Request):
 
 @app.post('/harvest/review')
 async def harvest_decide(request: Request):
-    """频道主按了审核单的按钮：{id, ok, existing, notify} → {result, count}。
+    """频道主按了审核单的按钮：{id, ok, existing, notify, channel} → {result, count, channel}。channel：发到这个测试频道（空＝正式频道）。
     result：approved 开始发 / rejected 不发 / done 已经审过 / busy 正在搬别的 / missing 没有这张（服务重启过）"""
     check_key(request)
     if harvester is None:
         raise HTTPException(409, 'not ready')
     body = await request.json()
     existing = [(str(t), str(a)) for t, a in body.get('existing', [])]
-    result, count = harvester.decide(str(body.get('id', '')), bool(body.get('ok')), existing, notify=body.get('notify') or None)
-    return {'result': result, 'count': count}
+    channel = str(body.get('channel') or '').lstrip('@')
+    if channel and not re.match(r'^\w{4,64}$', channel):
+        raise HTTPException(400, 'bad channel')
+    result, count = harvester.decide(str(body.get('id', '')), bool(body.get('ok')), existing,
+                                     notify=body.get('notify') or None, channel=channel)
+    return {'result': result, 'count': count, 'channel': channel}
 
 # ── 求歌：听众私聊机器人一个歌名，库里没有时到来源频道里找一首最像的搬进来 ──
 

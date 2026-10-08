@@ -896,7 +896,7 @@ await t('贴网址搬运：搬运设置可以开关网站和授权、改数量�
   const h = bot.toStreamer.at(-1);
   assert.equal(h.path, 'harvest');
   assert.equal(h.body.url, 'https://163cn.tv/abc', 'App 分享的整段文字也行');
-  assert.deepEqual(h.body.settings, { limit: 30, playlist: '纯音乐', sites: ['netease'] });
+  assert.deepEqual(h.body.settings, { limit: 30, playlist: '纯音乐', channel: '', sites: ['netease'] });
   assert.equal(h.body.notify, OWNER);
   assert.equal(h.body.link, BASE, '审核单里「查看全部」的网址');
   assert.match(lastSay().text, /开始从网易云音乐 music.163.com抓，最多 30 首。抓完发审核单给你/);
@@ -910,7 +910,7 @@ await t('贴网址搬运：搬运设置可以开关网站和授权、改数量�
   assert.equal(q.path, 'harvest');
   assert.equal(q.body.query, '小橘 晴天');
   assert.equal(q.body.url, undefined);
-  assert.deepEqual(q.body.settings, { limit: 8, playlist: '纯音乐', sites: ['netease'] });
+  assert.deepEqual(q.body.settings, { limit: 8, playlist: '纯音乐', channel: '', sites: ['netease'] });
   assert.match(lastSay().text, /开始在网易云音乐 music.163.com搜「小橘 晴天」，最多 8 首。抓完发审核单给你/);
   await dm(OWNER, '爬小橘');
   assert.equal(bot.toStreamer.at(-1).body.query, '小橘');
@@ -932,7 +932,7 @@ await t('贴网址搬运：搬运设置可以开关网站和授权、改数量�
   pl = Object.fromEntries((await lib.listPlaylists()).map(p => [p.name, p.tracks]));
   assert.ok(!pl['华语流行'].includes(982));
   const st = await lib.getHarvest();
-  assert.deepEqual(st, { limit: 30, playlist: '' });
+  assert.deepEqual(st, { limit: 30, playlist: '', channel: '' });
   for (const id of [980, 981, 982]) await admin('remove', { track: id });
   await admin('playlists', { playlists: [] });
 });
@@ -959,6 +959,25 @@ await t('贴网址搬运的审核单：按通过 / 失败交给流式服务，�
   assert.ok(e.text.startsWith('🛂 审核单 abcdefghijklmn') && e.text.includes('· 甲 — A'));
   assert.ok(!e.text.includes('逐个核对') && e.text.endsWith('✅ 审核通过：2 首开始发进频道，发完告诉你'));
   assert.equal(e.reply_markup, undefined, '按钮去掉了');
+  assert.equal(call.body.channel, '', '默认发正式频道');
+
+  // 测试频道：审核通过的先发去那里
+  await dm(OWNER, '搬运频道 @xiaoju_test');
+  assert.match(lastSay().text, /先发到测试频道 @xiaoju_test，不进小橘音乐/);
+  await dm(OWNER, '搬运设置');
+  assert.match(lastSay().text, /发到频道：测试频道 @xiaoju_test/);
+  const approved = bot.review;
+  bot.review = { ...approved, channel: 'xiaoju_test' };
+  await pressSheet(OWNER, 'hv:ok:abcdefghijklmn');
+  assert.equal(bot.toStreamer.at(-1).body.channel, 'xiaoju_test');
+  assert.match(acks(), /2 首开始发进测试频道 @xiaoju_test/);
+  await dm(OWNER, '搬运频道 不合法的 名字');
+  assert.match(lastSay().text, /频道名不对/);
+  await dm(OWNER, '搬运频道 正式');
+  assert.equal((await lib.getHarvest()).channel, '');
+  await dm(OWNER, '搬运设置');
+  assert.match(lastSay().text, /发到频道：正式频道 @xiaojumusic/);
+  bot.review = approved;
 
   bot.review = { result: 'rejected', count: 2 };
   await pressSheet(OWNER, 'hv:no:abcdefghijklmn');

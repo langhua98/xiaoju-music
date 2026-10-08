@@ -156,9 +156,10 @@ class Harvester:
         return {'id': b['id'], 'site': b['site'], 'url': b['url'], 'query': b.get('query', ''), 'status': b['status'],
                 'tracks': [{'title': t.title, 'artist': t.artist, 'page': t.page_url} for t in b['tracks']]}
 
-    def decide(self, sid, ok, existing, notify=None):
+    def decide(self, sid, ok, existing, notify=None, channel=''):
         """频道主按了审核单的按钮 → (结果, 首数)。结果：'missing' 没有这张（服务重启过）/ 'done' 已经审过 /
-        'busy' 正在抓或发别的，等会儿再点 / 'approved' 开始发 / 'rejected' 不发了"""
+        'busy' 正在抓或发别的，等会儿再点 / 'approved' 开始发 / 'rejected' 不发了。
+        channel：发到这个测试频道（空＝正式频道）"""
         b = self.sheets.get(sid)
         if b is None:
             return 'missing', 0
@@ -171,14 +172,16 @@ class Harvester:
             return 'busy', len(b['tracks'])
         b['status'] = 'approved'
         self.state = self._fresh('post', b['url'], b['site'])
+        self.state['channel'] = channel
         seen = {norm(t) + '|' + norm(a) for t, a in existing}
-        self.task = asyncio.create_task(self._post(b, seen, notify))
+        self.task = asyncio.create_task(self._post(b, seen, notify, channel))
         return 'approved', len(b['tracks'])
 
     # ── 通过后：一首首发进频道 ──
 
-    async def _post(self, sheet, seen, notify):
+    async def _post(self, sheet, seen, notify, channel=''):
         st = self.state
+        send = (lambda *a: self.send(*a, channel=channel)) if channel else self.send
         try:
             for t in sheet['tracks']:
                 row = {'title': t.title, 'artist': t.artist, 'page': t.page_url}
@@ -188,7 +191,7 @@ class Harvester:
                     st['skipped'] += 1
                     continue
                 try:
-                    new_id = await self.publish(t, http=self.http, send=self.send)
+                    new_id = await self.publish(t, http=self.http, send=send)
                 except UploadError as e:
                     row['status'], row['reason'] = 'failed', str(e)
                     continue
@@ -221,7 +224,7 @@ class Harvester:
         elif crawl:
             head = f'📥 从{st["site"]}' + (f'搜「{st["query"]}」' if st.get('query') else '') + f'抓到 {st["review"]} 首，等你审核（审核单另发）' + (f'，跳过 {st["skipped"]} 首' if st['skipped'] else '')
         else:
-            head = f'📥 审核通过的发进频道 {st["copied"]} 首' + (f'，没发 {len(rows) - st["copied"]} 首' if len(rows) > st['copied'] else '')
+            head = f'📥 审核通过的发进' + (f'测试频道 @{st["channel"]}' if st.get('channel') else '频道') + f' {st["copied"]} 首' + (f'，没发 {len(rows) - st["copied"]} 首' if len(rows) > st['copied'] else '')
         lines = [head]
         done = [r for r in rows if r.get('status') == 'copied']
         if done:
