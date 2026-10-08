@@ -226,7 +226,7 @@ class Harvester:
                     continue
                 except Exception as e:  # noqa: BLE001 — 一首出错不影响后面的
                     log.exception('publish failed')
-                    row['status'], row['reason'] = 'failed', type(e).__name__
+                    row['status'], row['reason'] = 'failed', f'{type(e).__name__}: {e}'[:120]
                     continue
                 seen.add(song_key(t))
                 row['status'], row['id'] = 'copied', new_id
