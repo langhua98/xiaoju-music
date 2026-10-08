@@ -93,7 +93,7 @@ UTF-8、GBK、UTF-16 编码都认；配上之后可以把频道里的这条 `.lr
 | KV（旧） | `xiaoju-music-tracks`，id=`738216f3f7d64f1ab143128406d1b35e`，绑定名 `TRACKS`，只用于迁移 |
 | Secret | `TG_BOT_TOKEN`、`TG_WEBHOOK_SECRET`、`ADMIN_KEY`、`STREAMER_KEY` |
 | 普通变量 | `CHANNEL_ID=-1003817921075`、`CHANNEL_USERNAME=xiaojumusic`（频道改私密后这个用户名已经不存在，只剩管理接口原样返回它）、`STREAMER_URL`（流式服务地址，空＝大文件不能播放） |
-| Telegram webhook | `…/tg-webhook`，`allowed_updates=["channel_post","edited_channel_post"]` |
+| Telegram webhook | `…/tg-webhook`，`allowed_updates=["channel_post","edited_channel_post","message","callback_query"]`（后两种是机器人私聊和按钮） |
 
 **secret 绝不能写进仓库**（这个仓库是公开的，GitHub Pages 会把它原样发布出去）。
 `TG_WEBHOOK_SECRET` 在 Cloudflare 里读不回来；丢了就生成一个新的，同时更新 Worker 的 secret 和

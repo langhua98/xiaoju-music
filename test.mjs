@@ -1207,7 +1207,7 @@ await t('封面、歌词补全：没自带封面先用网易云的专辑封面�
   await dm(OWNER, '补歌词');
   assert.match(lastSay().text, /^好的，\d+ 首没歌词或只有文字的歌/);
   assert.equal((await lib.getLyrics(923)).retry_at, 1);
-  // 后台补全：每分钟的定时任务把还没找过的封面、歌词先找好存起来，不用等人打开
+  // 后台补全：每 5 分钟的定时任务把还没找过的封面、歌词先找好存起来，不用等人打开
   await hook({ channel_post: noThumb(924, { title: '柠檬水', performer: '小橘', duration: 150 }) });
   assert.equal(await lib.getCover(924), null);
   assert.equal(await lib.getLyrics(924), null);
