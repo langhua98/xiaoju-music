@@ -1,21 +1,29 @@
-# 临时：api-enhanced 4.41.1 在 Space 用的 Debian bookworm 自带 Node 上能不能跑
+# 临时：歌手主页、用户主页怎么数歌
 name: Probe NetEase VIP
 on:
   push:
     branches: [claude/probe-netease-search]
 jobs:
-  node18:
+  homepage:
     runs-on: ubuntu-latest
     steps:
       - run: |
-          docker run --rm debian:bookworm-slim sh -c '
-            apt-get update -qq && apt-get install -y -qq --no-install-recommends nodejs npm ca-certificates curl >/dev/null
-            node --version
-            mkdir /opt/netease-api && cd /opt/netease-api && npm init -y >/dev/null && npm install --omit=dev --ignore-scripts --silent @neteasecloudmusicapienhanced/api@4.41.1
-            du -sh /opt/netease-api
-            (PORT=3017 HOST=127.0.0.1 node /opt/netease-api/node_modules/@neteasecloudmusicapienhanced/api/app.js >/tmp/api.log 2>&1 &)
-            sleep 10
-            curl -s "http://127.0.0.1:3017/cloudsearch?keywords=%E5%B0%8F%E6%A9%98&type=1&limit=2" | head -c 300; echo
-            curl -s "http://127.0.0.1:3017/song/url/v1?id=3421291463&level=exhigh" | head -c 300; echo
-            curl -s "http://127.0.0.1:3017/login/qr/key?timestamp=1" | head -c 80; echo
-            tail -5 /tmp/api.log'
+          mkdir api && cd api && npm init -y >/dev/null && npm install --omit=dev --ignore-scripts --silent @neteasecloudmusicapienhanced/api@4.41.1
+          (PORT=3017 HOST=127.0.0.1 node node_modules/@neteasecloudmusicapienhanced/api/app.js >/dev/null 2>&1 &) ; sleep 8
+          python3 - <<'PY'
+          import json, urllib.request
+          B = 'http://127.0.0.1:3017'
+          g = lambda p: json.load(urllib.request.urlopen(B + p, timeout=60))
+          d = g('/artist/detail?id=5781')['data']
+          print('artist/detail keys', sorted(d), '| artist', {k: d['artist'].get(k) for k in ('name', 'musicSize', 'albumSize')})
+          u = d.get('user') or {}
+          print('artist.user', {k: u.get(k) for k in ('userId', 'nickname', 'artistId', 'userType')})
+          s = g('/artist/songs?id=5781&limit=2&offset=0&order=time')
+          print('artist/songs total', s.get('total'), 'more', s.get('more'), 'fee', [x.get('fee') for x in s.get('songs', [])])
+          if u.get('userId'):
+              p = g(f"/user/detail?uid={u['userId']}")
+              prof = p.get('profile') or {}
+              print('user/detail top keys', sorted(p)[:30])
+              print('profile', {k: prof.get(k) for k in ('nickname', 'artistId', 'userType', 'artistName')})
+              print('identify', p.get('identify'), '| bindings?', 'bindings' in p)
+          PY
