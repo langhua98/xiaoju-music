@@ -1,13 +1,14 @@
-# 临时：Space 起来没有
+# 临时：两个频道链接是不是同一个频道
 name: Probe NetEase VIP
 on:
   push:
     branches: [claude/probe-netease-search]
 jobs:
-  space:
+  channels:
     runs-on: ubuntu-latest
     steps:
       - run: |
-          curl -s https://huggingface.co/api/spaces/langhua1998/douyin-proxy/runtime | head -c 400; echo
-          curl -s -o /dev/null -w "music /m/: %{http_code}\n" -m 60 https://langhua1998-douyin-proxy.hf.space/m/
-          curl -s -m 60 https://langhua1998-douyin-proxy.hf.space/m/ | head -c 300; echo
+          for u in https://t.me/xiaojumusic https://t.me/+lNz0nvb9DLA3ODIx https://t.me/s/xiaojumusic; do
+            echo "== $u"
+            curl -sL -m 30 "$u" | grep -oE '<meta property="og:(title|description)" content="[^"]*"|tgme_page_extra">[^<]*|tgme_action_button_label">[^<]*|tgme_channel_info_counter"><span class="counter_value">[^<]*</span> <span class="counter_type">[^<]*' | head -6
+          done
