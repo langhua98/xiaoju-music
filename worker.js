@@ -422,10 +422,18 @@ async function selfCheck(env, force) {
   if (!force && Date.now() - (last.at || 0) < CHECK_EVERY_MS) return last;
   if (!streamerOn(env)) return last;
   await L.setConfig('health', JSON.stringify({ ...last, at: Date.now() }));  // 先占住，免得下一分钟又跑一遍
-  const r = await streamerCall(env, '/netease/check', {
-    cookie: (await neteaseAccount(env)).cookie || '', alts: (await getAlts(env)).map(a => a.url),
-  });
-  if (r.status !== 200) return last;
+  let r;
+  try {
+    r = await streamerCall(env, '/netease/check', {
+      cookie: (await neteaseAccount(env)).cookie || '', alts: (await getAlts(env)).map(a => a.url),
+    });
+  } catch {
+    r = { status: 0 };
+  }
+  if (r.status !== 200) {  // 流式服务睡着、还没部署好：不占这一小时，下一分钟再试
+    await L.setConfig('health', JSON.stringify(last));
+    return last;
+  }
   const health = { ...r.data, at: Date.now() };
   await L.setConfig('health', JSON.stringify(health));
   return health;
