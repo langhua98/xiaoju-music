@@ -1,30 +1,27 @@
-# 临时：看 Worker 的定时任务跑没跑、有没有出错（只输出定时任务的 cron、结果、报错，不输出访客请求）
+# 临时：Cloudflare 记下的定时任务每次运行（时间、cron、结果、CPU）
 name: Probe NetEase VIP
 on:
   push:
     branches: [claude/probe-netease-search]
 jobs:
-  tail:
+  cron:
     runs-on: ubuntu-latest
     steps:
       - env:
           CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
-          CLOUDFLARE_ACCOUNT_ID: aca35ff5f62ae4208757219dbc3b489b
         run: |
-          curl -s "https://api.cloudflare.com/client/v4/accounts/$CLOUDFLARE_ACCOUNT_ID/workers/scripts/xiaoju-music/schedules" -H "Authorization: Bearer $CLOUDFLARE_API_TOKEN" | python3 -c 'import json,sys; d=json.load(sys.stdin); print("schedules", d.get("result"), d.get("errors"))'
-          timeout 150 npx -y wrangler@3 tail xiaoju-music --format json > tail.jsonl 2> tail.err || true
-          tail -3 tail.err | cut -c1-200
           python3 - <<'PY'
-          import json
-          n = 0
-          for line in open('tail.jsonl', encoding='utf-8'):
-              try: e = json.loads(line)
-              except Exception: continue
-              ev = e.get('event') or {}
-              if 'cron' not in ev: continue
-              n += 1
-              print('cron', ev.get('cron'), '| outcome', e.get('outcome'), '| cpu/wall', e.get('cpuTime'), e.get('wallTime'),
-                    '| exceptions', [x.get('message') for x in e.get('exceptions') or []][:3],
-                    '| logs', [str(l.get('message'))[:200] for l in e.get('logs') or []][:5])
-          print('scheduled events seen:', n)
+          import json, os, urllib.request, datetime
+          since = (datetime.datetime.utcnow() - datetime.timedelta(hours=8)).strftime('%Y-%m-%dT%H:%M:%SZ')
+          q = '''query($acc: String!, $since: Time!) { viewer { accounts(filter: {accountTag: $acc}) {
+            workersInvocationsScheduled(filter: {scriptName: "xiaoju-music", datetime_geq: $since}, limit: 30, orderBy: [datetime_DESC]) {
+              datetime cron status cpuTimeUs } } } }'''
+          body = json.dumps({'query': q, 'variables': {'acc': 'aca35ff5f62ae4208757219dbc3b489b', 'since': since}}).encode()
+          req = urllib.request.Request('https://api.cloudflare.com/client/v4/graphql', data=body, headers={
+              'Authorization': 'Bearer ' + os.environ['CLOUDFLARE_API_TOKEN'], 'Content-Type': 'application/json'})
+          d = json.load(urllib.request.urlopen(req, timeout=30))
+          if d.get('errors'): print('errors', d['errors'])
+          rows = (((d.get('data') or {}).get('viewer') or {}).get('accounts') or [{}])[0].get('workersInvocationsScheduled') or []
+          print('rows', len(rows))
+          for r in rows: print(r)
           PY
