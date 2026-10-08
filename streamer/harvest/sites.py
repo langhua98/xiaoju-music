@@ -74,9 +74,12 @@ class NetEase:
         """按关键词（歌名、歌手）搜单曲，网易云排好的顺序。"""
         offset = 0
         while offset < limit:
-            d = await http.get_json(f'{self.API}/search/get/web', {
+            # 不用 /search/get/web：海外请求它只回一串加密的字符串
+            d = await http.get_json(f'{self.API}/search/get', {
                 's': query, 'type': '1', 'limit': str(min(limit - offset, 100)), 'offset': str(offset)})
             r = d.get('result') or {}
+            if not isinstance(r, dict):
+                raise RuntimeError(f'网易云搜索返回的格式变了（code {d.get("code")}）')
             page = r.get('songs') or []
             for s in page:
                 yield self._track(s)

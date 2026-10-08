@@ -209,7 +209,7 @@ Space 的 `Dockerfile`、`requirements.txt` 归视频仓库管：音乐要加新
   设置（`搬运数量 N`；`搬运歌单 名字|自动`，名字不存在就新建歌单）存在 config 的 `harvest`。
   加新网站：在 `sites.py` 写一个适配器（`key`、`name`、`match`、`items`）放进 `ADAPTERS`，再在 Worker 的 `HARVEST_SITES` 里加名字。
 - **爬 关键词**（频道主私聊机器人发「爬 歌名或歌手」，可以带数量：`爬 小橘 30`）：不用网址，流式服务直接在网易云上搜
-  （`/api/search/get/web`，网易云排好的顺序），后面和贴网址一样：查重、限数量、出审核单，点「通过」才发进频道。
+  （`/api/search/get`，网易云排好的顺序；`/api/search/get/web` 对海外请求只回加密字符串，不能用），后面和贴网址一样：查重、限数量、出审核单，点「通过」才发进频道。
   搜出来的不一定都是我们的歌，审核单里要逐首核对。能搜的网站在适配器里多写一个 `search(query, limit, http)`。
 - **夜里自动搬**：Worker 的定时任务 `0 19 * * *`（北京时间凌晨 3 点）跑 `nightly`：叫醒流式服务，读上一晚
   `/auto/status`，把每个来源频道「看到的最大消息号」合进 config 的 `auto.state`，再 `/auto/start`：每个频道只看

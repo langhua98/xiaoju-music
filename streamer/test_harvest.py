@@ -78,12 +78,12 @@ def test_netease_song_album_playlist_artist_and_short_link():
 def test_netease_search_pages_until_limit_or_end():
     q = '小橘'  # FakeHttp 不编码
     pages = {
-        NE + f'/search/get/web?limit=3&offset=0&s={q}&type=1': {'result': {'songCount': 5, 'songs': [
+        NE + f'/search/get?limit=3&offset=0&s={q}&type=1': {'result': {'songCount': 5, 'songs': [
             ne_song(1, '甲', ['小橘']), ne_song(2, '乙', ['小橘'])]}},
-        NE + f'/search/get/web?limit=1&offset=2&s={q}&type=1': {'result': {'songCount': 5, 'songs': [ne_song(3, '丙', ['小橘'])]}},
-        NE + f'/search/get/web?limit=100&offset=0&s={q}&type=1': {'result': {'songCount': 2, 'songs': [
+        NE + f'/search/get?limit=1&offset=2&s={q}&type=1': {'result': {'songCount': 5, 'songs': [ne_song(3, '丙', ['小橘'])]}},
+        NE + f'/search/get?limit=100&offset=0&s={q}&type=1': {'result': {'songCount': 2, 'songs': [
             ne_song(1, '甲', ['小橘']), ne_song(2, '乙', ['小橘'])]}},
-        NE + '/search/get/web?limit=100&offset=0&s=none&type=1': {'result': {'songCount': 0}},
+        NE + '/search/get?limit=100&offset=0&s=none&type=1': {'result': {'songCount': 0}},
     }
 
     def search(query, limit):
@@ -97,6 +97,9 @@ def test_netease_search_pages_until_limit_or_end():
     titles, asked = search('小橘', 150)
     assert titles == ['甲', '乙'] and len(asked) == 1, '搜完了就停'
     assert search('none', 150)[0] == []
+    pages[NE + '/search/get?limit=100&offset=0&s=enc&type=1'] = {'code': 200, 'result': '35b1748964af'}
+    with pytest.raises(RuntimeError, match='格式变了'):
+        search('enc', 150)
 
 
 # ── 上传 ──
