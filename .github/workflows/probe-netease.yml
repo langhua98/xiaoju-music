@@ -1,24 +1,70 @@
-name: Probe NetEase search
+# 临时：用 api-enhanced 试 VIP 登录能不能下到 VIP 歌。二维码加密后才进日志，登录凭证不进日志
+name: Probe NetEase VIP
 on:
   push:
     branches: [claude/probe-netease-search]
 jobs:
-  probe:
+  qr:
+    runs-on: ubuntu-latest
+    outputs:
+      key: ${{ steps.qr.outputs.key }}
+    steps:
+      - run: git clone --depth 1 https://github.com/NeteaseCloudMusicApiEnhanced/api-enhanced api && cd api && npm install --omit=dev --silent
+      - id: qr
+        run: |
+          cd api && (PORT=3000 node app.js > ../api.log 2>&1 &) && sleep 8
+          cat > pub.pem <<'PEM'
+          -----BEGIN PUBLIC KEY-----
+          MIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEA6/Ai1kYGHVUczS4g1HJu
+          wOttlNg33cuMPK46Zzm+DSfcBV29QHEcuKbHarxuAx86ldzqiCDwxRUEiO0j+h0j
+          yZWczq6Fuu1y5+KLACmI9f8Go//jV34sFYIoWZJvFscU5jYf5+F8e0EqoVDaS+My
+          lLsVW7JIT7UsJCuAFCt0oyt7h64bdJlyeO90QAJk2vNKaIQ1HOY7U3VmrE30YlUd
+          OaCokKiAHui/TnVCZJu5/EJ0sC1nYbQt2g/Xqv/5xQkJ9T5H+k4QO/dQX+3lqoZt
+          879aX1SMLnen6rd/7XSMXoTte6ew7VUn9IWZ9l/S0F3Bbg1/L2csswWOQ+XAW1mU
+          fwIDAQAB
+          -----END PUBLIC KEY-----
+          PEM
+          KEY=$(curl -s "localhost:3000/login/qr/key?timestamp=$(date +%s%N)" | python3 -c 'import json,sys; print(json.load(sys.stdin)["data"]["unikey"])')
+          URL=$(curl -s "localhost:3000/login/qr/create?key=$KEY" | python3 -c 'import json,sys; print(json.load(sys.stdin)["data"]["qrurl"])')
+          echo "key=$KEY" >> $GITHUB_OUTPUT
+          echo "QR_ENC_BEGIN"; printf %s "$URL" | openssl pkeyutl -encrypt -pubin -inkey pub.pem | base64 -w0; echo; echo "QR_ENC_END"
+  login-and-test:
+    needs: qr
     runs-on: ubuntu-latest
     steps:
-      - run: |
+      - run: git clone --depth 1 https://github.com/NeteaseCloudMusicApiEnhanced/api-enhanced api && cd api && npm install --omit=dev --silent
+      - env:
+          KEY: ${{ needs.qr.outputs.key }}
+        run: |
+          cd api && (PORT=3000 node app.js > ../api.log 2>&1 &) && sleep 8
           python3 - <<'PY'
-          import json, urllib.parse, urllib.request
-          UA = 'XiaojuMusicHarvester/1.0 (https://xiaoju-music.langhua98.workers.dev; own-song importer)'
-          H = {'User-Agent': UA, 'Referer': 'https://music.163.com/'}
-          q = urllib.parse.quote('小橘')
-          d = json.load(urllib.request.urlopen(urllib.request.Request(f'https://music.163.com/api/search/get?s={q}&type=1&limit=8&offset=0', headers=H), timeout=20))
-          for s in d['result']['songs']:
-              url = f"https://music.163.com/song/media/outer/url?id={s['id']}.mp3"
-              try:
-                  r = urllib.request.urlopen(urllib.request.Request(url, headers=H), timeout=30)
-                  data = r.read(400000)
-                  print(s['id'], s['name'][:20], '| fee', s.get('fee'), '| ->', r.geturl()[:70], '|', r.headers.get('Content-Type'), '| len', r.headers.get('Content-Length'), '| head', data[:16])
-              except Exception as e:
-                  print(s['id'], s['name'][:20], '| fee', s.get('fee'), '| error', e)
+          import json, os, time, urllib.parse, urllib.request
+          B = 'http://localhost:3000'
+          def get(path, **q):
+              q['timestamp'] = str(time.time_ns())
+              return json.load(urllib.request.urlopen(B + path + '?' + urllib.parse.urlencode(q), timeout=60))
+          cookie = None
+          for i in range(100):  # 最多等 5 分钟扫码
+              r = get('/login/qr/check', key=os.environ['KEY'], noCookie='true')
+              if r.get('code') == 803:
+                  cookie = r.get('cookie'); break
+              if r.get('code') == 800:
+                  print('二维码过期了'); break
+              if i % 10 == 0: print('等扫码…', r.get('code'), r.get('message'))
+              time.sleep(3)
+          if not cookie:
+              raise SystemExit('没登录上')
+          acc = get('/user/account', cookie=cookie)
+          prof = (acc.get('profile') or {})
+          print('登录成功：', prof.get('nickname'), '| vipType', prof.get('vipType'), '| account vipType', (acc.get('account') or {}).get('vipType'))
+          ids = ['1929385125', '1318877064', '3400748266', '3400749090']
+          d = get('/song/detail', ids=','.join(ids), cookie=cookie)
+          fee = {str(s['id']): (s['name'], s.get('fee')) for s in d.get('songs', [])}
+          for real in ['', '116.25.146.177']:
+              for level in ['exhigh', 'lossless']:
+                  extra = {'realIP': real} if real else {}
+                  r = get('/song/url/v1', id=','.join(ids), level=level, cookie=cookie, **extra)
+                  for x in r.get('data', []):
+                      n, f = fee.get(str(x['id']), ('?', '?'))
+                      print('国内IP' if real else '海外IP', level, '|', n, '| fee', f, '| url', bool(x.get('url')), '| br', x.get('br'), '| size', x.get('size'), '| 试听', bool(x.get('freeTrialInfo')), '| code', x.get('code'))
           PY
