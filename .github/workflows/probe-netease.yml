@@ -1,0 +1,38 @@
+name: Probe NetEase search
+on:
+  push:
+    branches: [claude/probe-netease-search]
+jobs:
+  probe:
+    runs-on: ubuntu-latest
+    steps:
+      - run: |
+          python3 - <<'PY'
+          import json, urllib.parse, urllib.request
+          UA = 'XiaojuMusicHarvester/1.0 (https://xiaoju-music.langhua98.workers.dev; own-song importer)'
+          q = urllib.parse.quote('小橘')
+          for path in ['search/get/web', 'search/get', 'cloudsearch/pc', 'search/pc']:
+              for method in ['GET', 'POST']:
+                  url = f'https://music.163.com/api/{path}'
+                  qs = f's={q}&type=1&limit=3&offset=0'
+                  try:
+                      if method == 'GET':
+                          req = urllib.request.Request(url + '?' + qs, headers={'User-Agent': UA, 'Referer': 'https://music.163.com/'})
+                      else:
+                          req = urllib.request.Request(url, data=qs.encode(), headers={'User-Agent': UA, 'Referer': 'https://music.163.com/', 'Content-Type': 'application/x-www-form-urlencoded'})
+                      body = urllib.request.urlopen(req, timeout=20).read().decode('utf-8', 'replace')
+                      try:
+                          d = json.loads(body)
+                          r = d.get('result') if isinstance(d, dict) else None
+                          songs = r.get('songs') if isinstance(r, dict) else None
+                          s0 = songs[0] if songs else None
+                          print(method, path, '| code', d.get('code') if isinstance(d, dict) else '?', '| result type', type(r).__name__,
+                                '| songs', len(songs or []), '| count', r.get('songCount') if isinstance(r, dict) else '-',
+                                '| keys', sorted(s0)[:12] if s0 else '-', '| first', (s0 or {}).get('name'))
+                          if not songs:
+                              print('   body:', body[:200])
+                      except Exception as e:
+                          print(method, path, '| not json', body[:200])
+                  except Exception as e:
+                      print(method, path, '| error', e)
+          PY
