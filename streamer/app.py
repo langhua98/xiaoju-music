@@ -25,14 +25,12 @@ import asyncio
 import base64
 import hmac
 import io
-import json
 import logging
 import os
 import re
 import subprocess
 import time
 import urllib.parse
-import urllib.request
 from contextlib import asynccontextmanager
 
 import numpy as np
@@ -824,12 +822,16 @@ async def harvest_decide(request: Request):
                                      notify=body.get('notify') or None, channel=channel, cookie=str(body.get('cookie') or ''))
     return {'result': result, 'count': count, 'channel': channel}
 
-# ── 网易云登录：频道主扫码，登录凭证（cookie）交给 Worker 存着，每次审核通过时带过来取 VIP 歌的下载地址 ──
+# ── 网易云登录：频道主扫码，登录凭证（cookie）先留在这里，Worker 下次来（GET /netease/session）取走存着，
+# 每次审核通过时带过来取 VIP 歌的下载地址。不主动推给 Worker：Hugging Face 的机房挡掉了 *.workers.dev ──
 
 netease_login_task = None
 
-async def netease_login(notify, link, key=None, poll=3.0, wait=180):
-    """二维码发给频道主 → 等他扫码确认 → cookie 交给 Worker（POST {link}/netease-cookie，带流式服务密钥）"""
+netease_session = {}  # 刚扫码登录的 {cookie, nickname, at}，等 Worker 来取
+
+async def netease_login(notify, key=None, poll=3.0, wait=180):
+    """二维码发给频道主 → 等他扫码确认 → cookie 记在 netease_session"""
+    global netease_session
     ne, http = NetEase(), Http(gap=0)
     try:
         key = key or (await ne._get(http, '/login/qr/key', timestamp=str(time.time_ns())))['data']['unikey']
@@ -846,10 +848,7 @@ async def netease_login(notify, link, key=None, poll=3.0, wait=180):
                 cookie = r['cookie']
                 acc = await http.get_json(ne.api + '/user/account', {'cookie': cookie, 'timestamp': str(time.time_ns())})
                 nick = ((acc.get('profile') or {}).get('nickname')) or ''
-                body = json.dumps({'cookie': cookie, 'nickname': nick}).encode()
-                req = urllib.request.Request(link.rstrip('/') + '/netease-cookie', data=body, method='POST', headers={
-                    'Content-Type': 'application/json', 'X-Key': settings().get('STREAMER_KEY', '')})
-                await asyncio.to_thread(lambda: urllib.request.urlopen(req, timeout=30).read())
+                netease_session = {'cookie': cookie, 'nickname': nick, 'at': int(time.time() * 1000)}
                 return await bot_say(notify, f'✅ 网易云已登录：{nick or "（没取到昵称）"}。以后审核通过的 VIP 歌用这个账号下载')
         await bot_say(notify, '⌛ 二维码过期了，要登录的话再发一次「网易云登录」')
     except Exception as e:  # noqa: BLE001
@@ -858,19 +857,22 @@ async def netease_login(notify, link, key=None, poll=3.0, wait=180):
 
 @app.post('/netease/login')
 async def netease_login_start(request: Request):
-    """{notify, link}：给频道主发网易云登录二维码，扫完把 cookie 交给 Worker。正在等扫码时再发一次就换一张新的"""
+    """{notify}：给频道主发网易云登录二维码。正在等扫码时再发一次就换一张新的"""
     check_key(request)
     global netease_login_task
     if bot_client is None or netease_proc is None:
         raise HTTPException(409, 'not ready')
     body = await request.json()
-    link = str(body.get('link') or '')
-    if not re.match(r'^https://', link):
-        raise HTTPException(400, 'bad link')
     if netease_login_task and not netease_login_task.done():
         netease_login_task.cancel()
-    netease_login_task = asyncio.create_task(netease_login(body.get('notify'), link))
+    netease_login_task = asyncio.create_task(netease_login(body.get('notify')))
     return {'ok': True}
+
+@app.get('/netease/session')
+async def netease_session_get(request: Request):
+    """Worker 来取刚扫码登录的 {cookie, nickname, at}（没有就是 {}）。取走后这里还留着，Worker 按 at 只存更新的"""
+    check_key(request)
+    return netease_session
 
 # ── 求歌：听众私聊机器人一个歌名，库里没有时到来源频道里找一首最像的搬进来 ──
 

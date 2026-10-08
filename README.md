@@ -221,8 +221,9 @@ Space 的 `Dockerfile`、`requirements.txt` 归视频仓库管：音乐要加新
   版本固定在 xiaoju-video 的 `streamer/Dockerfile` 里）。镜像构建时装到 `/opt/netease-api`，音乐的流式服务启动时用 `node` 在
   `127.0.0.1:3017` 拉起它（外面访问不到；它的输出丢掉，因为会打出登录 cookie）。没装时贴网址、爬歌报错，播放不受影响。
   它的「解灰」（`ENABLE_GENERAL_UNBLOCK`、`unblock=true`，从别的平台找同名歌顶替）**不要开**：搬的是我们传到网易云的那个文件。
-  **VIP 歌要登录**：频道主发「网易云登录」，流式服务（`POST /netease/login`）用机器人发二维码，扫码确认后把 cookie 交到 Worker 的
-  `POST /netease-cookie`（带流式服务密钥），存在 config 的 `netease`；审核通过时 Worker 把它带给 `/harvest/review`，
+  **VIP 歌要登录**：频道主发「网易云登录」，流式服务（`POST /netease/login`）用机器人发二维码，扫码确认后 cookie 先留在流式服务内存里
+  （流式服务推不到 Worker：Hugging Face 的机房按域名挡掉了 `*.workers.dev`），Worker 审核通过、看搬运设置时去 `GET /netease/session`
+  取，比存着的新就存进 config 的 `netease`（Space 重启了也还在）；审核通过时 Worker 把它带给 `/harvest/review`，
   发帖前才用它取下载地址（`/song/url/v1`，320k）。只给试听片段（会员过期）或不给地址的那首不发，报原因。
   看广告领的会员 `vipType` 显示 0，但照样能下 VIP 歌（2026 年 10 月试过，VIP 歌给 128k）；会员几小时到一天就过期，过期了在 App 里续上。
 - **夜里自动搬**：Worker 的定时任务 `0 19 * * *`（北京时间凌晨 3 点）跑 `nightly`：叫醒流式服务，读上一晚

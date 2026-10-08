@@ -312,7 +312,7 @@ def test_approval_fetches_download_urls_with_the_login_cookie():
     assert 'VIP：网易云只给试听片段' in said[-1]
 
 
-def test_netease_login_sends_the_qr_and_hands_the_cookie_to_the_worker(monkeypatch):
+def test_netease_login_sends_the_qr_and_keeps_the_cookie_for_the_worker(monkeypatch):
     monkeypatch.setenv('STREAMER_KEY', 'k1')
     checks = iter([{'code': 801}, {'code': 803, 'cookie': 'MUSIC_U=secret'}])
 
@@ -332,7 +332,7 @@ def test_netease_login_sends_the_qr_and_hands_the_cookie_to_the_worker(monkeypat
             assert path == '/user/account' and params['cookie'] == 'MUSIC_U=secret'
             return {'code': 200, 'profile': {'nickname': '还是一样i1998'}}
 
-    sent, posted, said = [], [], []
+    sent, said = [], []
 
     class Bot:
         async def send_file(self, chat, f, caption=''):
@@ -341,21 +341,17 @@ def test_netease_login_sends_the_qr_and_hands_the_cookie_to_the_worker(monkeypat
         async def send_message(self, chat, text, **kw):
             said.append(text)
 
-    class Resp:
-        def read(self):
-            return b'ok'
-
-    def urlopen(req, timeout=0):
-        posted.append((req.full_url, req.get_header('X-key'), req.data))
-        return Resp()
-
     monkeypatch.setattr(appmod, 'Http', Http)
     monkeypatch.setattr(appmod, 'bot_client', Bot())
-    monkeypatch.setattr(appmod.urllib.request, 'urlopen', urlopen)
-    asyncio.run(appmod.netease_login(9, 'https://w.example/', poll=0.001))
+    monkeypatch.setattr(appmod, 'netease_session', {})
+    asyncio.run(appmod.netease_login(9, poll=0.001))
     assert sent == [(9, b'PNG')]
-    assert posted == [('https://w.example/netease-cookie', 'k1', b'{"cookie": "MUSIC_U=secret", "nickname": "\\u8fd8\\u662f\\u4e00\\u6837i1998"}')]
     assert said == ['✅ 网易云已登录：还是一样i1998。以后审核通过的 VIP 歌用这个账号下载']
+    s = appmod.netease_session
+    assert (s['cookie'], s['nickname']) == ('MUSIC_U=secret', '还是一样i1998') and s['at'] > 0
+    c = TestClient(appmod.app)
+    assert c.get('/netease/session').status_code == 403
+    assert c.get('/netease/session', headers={'X-Key': 'k1'}).json()['cookie'] == 'MUSIC_U=secret' 
 
 
 def test_rejecting_a_sheet_posts_nothing():
