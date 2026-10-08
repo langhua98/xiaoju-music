@@ -886,7 +886,7 @@ await t('贴网址搬运：搬运设置可以开关网站和授权、改数量�
   await dm(OWNER, '搬运设置');
   const panel = lastSay();
   assert.match(panel.text, /每次最多抓：20 首/);
-  assert.match(panel.text, /支持：网易云音乐。抓到的全部进审核单/);
+  assert.match(panel.text, /支持：网易云音乐（贴网址，或发「爬 歌名或歌手」去上面搜）。抓到的全部进审核单/);
   assert.equal(panel.reply_markup, undefined, '没有网站、授权开关了');
   await dm(OWNER, '搬运数量 30');
   await dm(OWNER, '搬运歌单 纯音乐');
@@ -904,6 +904,21 @@ await t('贴网址搬运：搬运设置可以开关网站和授权、改数量�
   assert.equal(bot.toStreamer.at(-1).body.settings.limit, 5, '网址后面的数量只管这一次');
   await dm(OWNER, 'https://music.example.com/song/1');
   assert.match(lastSay().text, /这个网站还不支持。现在支持：网易云音乐/);
+  // 爬 关键词：不用网址，去网站上搜着抓
+  await dm(OWNER, '爬 小橘 晴天 8');
+  const q = bot.toStreamer.at(-1);
+  assert.equal(q.path, 'harvest');
+  assert.equal(q.body.query, '小橘 晴天');
+  assert.equal(q.body.url, undefined);
+  assert.deepEqual(q.body.settings, { limit: 8, playlist: '纯音乐', sites: ['netease'] });
+  assert.match(lastSay().text, /开始在网易云音乐 music.163.com搜「小橘 晴天」，最多 8 首。抓完发审核单给你/);
+  await dm(OWNER, '爬小橘');
+  assert.equal(bot.toStreamer.at(-1).body.query, '小橘');
+  assert.equal(bot.toStreamer.at(-1).body.settings.limit, 30, '没写数量用设置里的');
+  const n0 = bot.toStreamer.length;
+  await dm(OWNER, '爬');
+  assert.equal(bot.toStreamer.length, n0);
+  assert.match(lastSay().text, /爬什么？/);
   // 搬来的帖子（说明里有授权、来源）进「纯音乐」，不按类型分
   const caption = 'Gymnopedie No. 1 — Kevin MacLeod\n授权：频道主确认是小橘音乐自己的作品\n来源：https://music.163.com/song?id=11';
   await hook({ channel_post: { ...audioPost(980, { file_id: addFile(bytesOf(10, 980)), file_size: 10, title: 'Gymnopedie No. 1', performer: 'Kevin MacLeod' }), caption } });
@@ -975,6 +990,9 @@ await t('贴网址搬运的审核单：按通过 / 失败交给流式服务，�
   assert.ok(page.includes('href="https://music.163.com/song?id=1"') && !page.includes('href="javascript:'), '只放 http(s) 链接');
   assert.match(page, /2 首，确认是不是我们的歌，待审核/);
   assert.equal((await req('/harvest-review/ABC')).status, 404);
+  bot.sheet = { ...bot.sheet, url: '', query: '小橘 <i>' };  // 「爬 关键词」搜来的审核单
+  const qpage = await (await req('/harvest-review/abcdefghijklmn')).text();
+  assert.ok(qpage.includes('搜：小橘 &lt;i&gt;') && !qpage.includes('网址：'));
   bot.review = bot.sheet = null;
 });
 

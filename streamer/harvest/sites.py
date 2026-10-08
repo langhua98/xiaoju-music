@@ -1,7 +1,8 @@
 """网站适配器：每个网站一个类，只负责「这个网址里有哪些音频、每首的作者、下载地址」。
 
 不判断是不是我们的歌（那是频道主在审核单里做的），也不下载上传（那是 upload.py 的事）。
-加新网站：写一个有 key、name、match(url)、items(url, limit, http) 的类，放进 ADAPTERS。"""
+加新网站：写一个有 key、name、match(url)、items(url, limit, http) 的类，放进 ADAPTERS；
+能按关键词搜的再写 search(query, limit, http)，「爬 关键词」就会用它。"""
 
 import html
 import json
@@ -69,6 +70,20 @@ class NetEase:
         for s in songs[:limit]:
             yield self._track(s)
 
+    async def search(self, query, limit, http):
+        """按关键词（歌名、歌手）搜单曲，网易云排好的顺序。"""
+        offset = 0
+        while offset < limit:
+            d = await http.get_json(f'{self.API}/search/get/web', {
+                's': query, 'type': '1', 'limit': str(min(limit - offset, 100)), 'offset': str(offset)})
+            r = d.get('result') or {}
+            page = r.get('songs') or []
+            for s in page:
+                yield self._track(s)
+            offset += len(page)
+            if not page or offset >= int(r.get('songCount') or 0):
+                break
+
     async def _details(self, ids, http):
         d = await http.get_json(f'{self.API}/song/detail/?' + urlencode({'ids': json.dumps([int(i) for i in ids])}))
         return d.get('songs') or []
@@ -94,3 +109,8 @@ def find_adapter(url):
         if a.match(url):
             return a
     return None
+
+
+def search_adapters():
+    """能按关键词搜的网站"""
+    return [a for a in ADAPTERS if hasattr(a, 'search')]

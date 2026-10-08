@@ -1,4 +1,4 @@
-"""把适配器、上传串起来：贴一个网址 → 抓出里面的歌 → 凑成审核单发给频道主 → 频道主确认是我们的歌点「通过」→ 发进频道。
+"""把适配器、上传串起来：贴一个网址（或「爬 关键词」去网站上搜）→ 抓出里面的歌 → 凑成审核单发给频道主 → 频道主确认是我们的歌点「通过」→ 发进频道。
 
 抓取只是把歌放进审核单，不会直接发：和小橘视频的审核单一样，整批「通过 / 失败」，失败的一首都不发。
 审核单只存在内存里，服务重启就没了，重新发一次网址就行。
@@ -11,7 +11,7 @@ import re
 import secrets
 import string
 
-from .sites import find_adapter
+from .sites import find_adapter, search_adapters
 from .upload import UploadError, publish
 
 log = logging.getLogger('streamer.harvest')
@@ -53,6 +53,14 @@ class Harvester:
             return None, f'「{a.name}」在搬运设置里关着'
         return a, None
 
+    def check_query(self, settings):
+        """按关键词搜用哪个网站：→ (适配器, None) 或 (None, 原因)。"""
+        on = set(settings.get('sites') or ())
+        for a in search_adapters():
+            if a.key in on:
+                return a, None
+        return None, '没有开着的能搜歌的网站'
+
     def _fresh(self, kind, url, site):
         return {'status': 'running', 'kind': kind, 'url': url, 'site': site, 'copied': 0, 'skipped': 0,
                 'review': 0, 'review_id': '', 'results': [], 'new_ids': [], 'error': ''}
@@ -68,26 +76,29 @@ class Harvester:
 
     # ── 抓取：网址里的歌 → 审核单 ──
 
-    def start(self, url, settings, existing, notify=None, link=''):
-        """settings：{sites: [开着的网站], limit: 最多抓几首}。existing：库里已有的 [(歌名, 作者)]，有了的不进审核单。
+    def start(self, url, settings, existing, notify=None, link='', query=''):
+        """抓网址 url 里的歌；给了 query 就不看网址，去网站上按关键词搜。
+        settings：{sites: [开着的网站], limit: 最多抓几首}。existing：库里已有的 [(歌名, 作者)]，有了的不进审核单。
         link：Worker 的网址，审核单里「查看全部」用"""
         if self.running():
             raise RuntimeError('already running')
-        adapter, why = self.check_url(url, settings)
+        adapter, why = self.check_query(settings) if query else self.check_url(url, settings)
         if adapter is None:
             raise ValueError(why)
         self.state = self._fresh('crawl', url, adapter.name)
+        self.state['query'] = query
         seen = {norm(t) + '|' + norm(a) for t, a in existing}
-        self.task = asyncio.create_task(self._crawl(adapter, url, settings, seen, notify, link))
+        self.task = asyncio.create_task(self._crawl(adapter, url, query, settings, seen, notify, link))
 
-    async def _crawl(self, adapter, url, settings, seen, notify, link):
+    async def _crawl(self, adapter, url, query, settings, seen, notify, link):
         st = self.state
         limit = max(1, min(int(settings.get('limit') or 20), 200))
         pending = []
         try:
             # 多看一些：库里已有的会跳过
             queued = set()
-            async for t in adapter.items(url, limit * 3, self.http):
+            found = adapter.search(query, limit * 3, self.http) if query else adapter.items(url, limit * 3, self.http)
+            async for t in found:
                 if len(pending) >= limit:
                     break
                 if song_key(t) in queued:  # 同一页里重复的不进审核单两次
@@ -107,7 +118,7 @@ class Harvester:
         except Exception as e:  # noqa: BLE001
             log.exception('crawl failed')
             st['status'], st['error'] = 'error', f'{type(e).__name__}: {e}'[:200]
-        sheet = self._add_sheet(adapter.name, url, pending) if pending else None
+        sheet = self._add_sheet(adapter.name, url, pending, query) if pending else None
         if sheet:
             st['review'], st['review_id'] = len(pending), sheet['id']
         msgs = [(self.report(), None)]
@@ -118,8 +129,8 @@ class Harvester:
 
     # ── 审核单 ──
 
-    def _add_sheet(self, site, url, tracks):
-        sheet = {'id': sheet_id(), 'site': site, 'url': url, 'status': 'review', 'tracks': tracks}
+    def _add_sheet(self, site, url, tracks, query=''):
+        sheet = {'id': sheet_id(), 'site': site, 'url': url, 'query': query, 'status': 'review', 'tracks': tracks}
         self.sheets[sheet['id']] = sheet
         for old in list(self.sheets)[:-KEEP_SHEETS]:
             del self.sheets[old]
@@ -127,7 +138,7 @@ class Harvester:
 
     def sheet_text(self, sheet, link=''):
         n = len(sheet['tracks'])
-        lines = [f'🛂 审核单 {sheet["id"]}（{sheet["site"]}，{n} 首，确认是不是我们的歌）', f'网址：{sheet["url"]}', '']
+        lines = [f'🛂 审核单 {sheet["id"]}（{sheet["site"]}，{n} 首，确认是不是我们的歌）', f'搜：{sheet["query"]}' if sheet.get('query') else f'网址：{sheet["url"]}', '']
         for t in sheet['tracks'][:8]:
             lines.append(f'· {t.title}' + (f' — {t.artist}' if t.artist else '') + f'\n  {t.page_url}')
         if n > 8:
@@ -142,7 +153,7 @@ class Harvester:
         b = self.sheets.get(sid)
         if b is None:
             return None
-        return {'id': b['id'], 'site': b['site'], 'url': b['url'], 'status': b['status'],
+        return {'id': b['id'], 'site': b['site'], 'url': b['url'], 'query': b.get('query', ''), 'status': b['status'],
                 'tracks': [{'title': t.title, 'artist': t.artist, 'page': t.page_url} for t in b['tracks']]}
 
     def decide(self, sid, ok, existing, notify=None):
@@ -206,9 +217,9 @@ class Harvester:
         if st['status'] == 'error':
             head = f'⚠️ 出错了：{st["error"]}' + ('' if crawl else f'（已发 {st["copied"]} 首）')
         elif not rows:
-            head = '这个网址里没找到歌'
+            head = f'在{st["site"]}没搜到「{st["query"]}」' if st.get('query') else '这个网址里没找到歌'
         elif crawl:
-            head = f'📥 从{st["site"]}抓到 {st["review"]} 首，等你审核（审核单另发）' + (f'，跳过 {st["skipped"]} 首' if st['skipped'] else '')
+            head = f'📥 从{st["site"]}' + (f'搜「{st["query"]}」' if st.get('query') else '') + f'抓到 {st["review"]} 首，等你审核（审核单另发）' + (f'，跳过 {st["skipped"]} 首' if st['skipped'] else '')
         else:
             head = f'📥 审核通过的发进频道 {st["copied"]} 首' + (f'，没发 {len(rows) - st["copied"]} 首' if len(rows) > st['copied'] else '')
         lines = [head]

@@ -728,18 +728,20 @@ async def harvest_options(request: Request):
 
 @app.post('/harvest')
 async def harvest_start(request: Request):
-    """{url, settings: {sites, limit}, existing, notify, link}：开始抓，抓完发审核单。网址不支持或网站关着 → 400 带原因；正在忙 → 409。"""
+    """{url 或 query, settings: {sites, limit}, existing, notify, link}：开始抓（query 是按关键词去网站上搜），抓完发审核单。
+    网址不支持或网站关着 → 400 带原因；正在忙 → 409。"""
     check_key(request)
     if harvester is None:
         raise HTTPException(409, 'not ready')
     body = await request.json()
-    url = str(body.get('url', '')).strip()
-    if not re.match(r'^https?://', url):
+    url = str(body.get('url') or '').strip()
+    query = str(body.get('query') or '').strip()[:60]
+    if not query and not re.match(r'^https?://', url):
         raise HTTPException(400, '不是网址')
     existing = [(str(t), str(a)) for t, a in body.get('existing', [])]
     try:
         harvester.start(url, body.get('settings') or {}, existing, notify=body.get('notify') or None,
-                        link=str(body.get('link') or ''))
+                        link=str(body.get('link') or ''), query=query)
     except ValueError as e:
         raise HTTPException(400, str(e))
     except RuntimeError:

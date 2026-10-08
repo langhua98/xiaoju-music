@@ -75,6 +75,30 @@ def test_netease_song_album_playlist_artist_and_short_link():
     assert collect(NetEase(), 'https://music.163.com/#/discover', http) == []
 
 
+def test_netease_search_pages_until_limit_or_end():
+    q = '小橘'  # FakeHttp 不编码
+    pages = {
+        NE + f'/search/get/web?limit=3&offset=0&s={q}&type=1': {'result': {'songCount': 5, 'songs': [
+            ne_song(1, '甲', ['小橘']), ne_song(2, '乙', ['小橘'])]}},
+        NE + f'/search/get/web?limit=1&offset=2&s={q}&type=1': {'result': {'songCount': 5, 'songs': [ne_song(3, '丙', ['小橘'])]}},
+        NE + f'/search/get/web?limit=100&offset=0&s={q}&type=1': {'result': {'songCount': 2, 'songs': [
+            ne_song(1, '甲', ['小橘']), ne_song(2, '乙', ['小橘'])]}},
+        NE + '/search/get/web?limit=100&offset=0&s=none&type=1': {'result': {'songCount': 0}},
+    }
+
+    def search(query, limit):
+        http = FakeHttp(pages)
+
+        async def main():
+            return [t.title async for t in NetEase().search(query, limit, http)]
+        return asyncio.run(main()), http.asked
+
+    assert search('小橘', 3)[0] == ['甲', '乙', '丙'], '一页不够翻下一页，够了就停'
+    titles, asked = search('小橘', 150)
+    assert titles == ['甲', '乙'] and len(asked) == 1, '搜完了就停'
+    assert search('none', 150)[0] == []
+
+
 # ── 上传 ──
 
 def test_publish_converts_non_mp3_and_writes_source():
@@ -118,8 +142,13 @@ class Site:
         for t in self.tracks[:limit]:
             yield t
 
+    async def search(self, query, limit, http):
+        self.query = query
+        for t in self.tracks[:limit]:
+            yield t
 
-def run_job(tracks, settings=SETTINGS, existing=(), fail=(), then=None):
+
+def run_job(tracks, settings=SETTINGS, existing=(), fail=(), then=None, query=''):
     """抓一次；then(h)：抓完以后接着做的事（比如按审核单的按钮），返回值放进 state['then']"""
     published, said = [], []
 
@@ -138,8 +167,9 @@ def run_job(tracks, settings=SETTINGS, existing=(), fail=(), then=None):
     async def main():
         h = Harvester(http=None, send=None, say=say, sleep=sleep, publish_fn=fake_publish)
         site = Site([Track(*x) for x in tracks])
-        h.check_url = lambda url, s: (site, None)
-        h.start('https://music.163.com/#/artist?id=9', settings, list(existing), notify=9, link='https://w.example/')
+        h.check_url = h.check_query = lambda *a: (site, None)
+        h.start('' if query else 'https://music.163.com/#/artist?id=9', settings, list(existing), notify=9,
+                link='https://w.example/', query=query)
         await h.task
         if then is None:
             return h.state
@@ -215,6 +245,26 @@ def test_nothing_found_sends_no_sheet():
     assert said == ['这个网址里没找到歌'] and st['review_id'] == ''
 
 
+def test_crawling_by_keyword_searches_the_site():
+    async def sheet(h):
+        return h.sheet_info(h.state['review_id'])
+
+    st, published, said = run_job([('晴天', '小橘', 'u1', 'p1')], query='小橘 晴天', then=sheet)
+    assert published == []
+    assert said[0].startswith('📥 从假网站搜「小橘 晴天」抓到 1 首，等你审核')
+    assert '\n搜：小橘 晴天\n' in said[1][0] and '网址：' not in said[1][0]
+    assert st['then']['query'] == '小橘 晴天' and [t['title'] for t in st['then']['tracks']] == ['晴天']
+    st, _, said = run_job([], query='没有的歌')
+    assert said == ['在假网站没搜到「没有的歌」']
+
+
+def test_check_query_needs_a_searchable_site_turned_on():
+    h = Harvester(http=None, send=None)
+    a, why = h.check_query(SETTINGS)
+    assert a.key == 'netease' and why is None
+    assert h.check_query({'sites': []}) == (None, '没有开着的能搜歌的网站')
+
+
 def test_check_url_reports_unsupported_or_disabled_sites():
     h = Harvester(http=None, send=None)
     assert h.check_url('https://archive.org/details/x', SETTINGS) == (None, '这个网站还不支持')
@@ -232,6 +282,8 @@ def test_harvest_endpoints(monkeypatch):
     r = c.post('/harvest', json={'url': 'https://music.example.com/x', 'settings': SETTINGS}, headers=key)
     assert r.status_code == 400 and r.json()['detail'] == '这个网站还不支持'
     assert c.post('/harvest', json={'url': 'not a url'}, headers=key).status_code == 400
+    r = c.post('/harvest', json={'query': '小橘', 'settings': {'sites': []}}, headers=key)
+    assert r.status_code == 400 and r.json()['detail'] == '没有开着的能搜歌的网站'
     assert c.get('/harvest/status', headers=key).json() == {'status': 'idle'}
     assert c.get('/harvest/review/abcdefghijklmn', headers=key).status_code == 404
     assert c.get('/harvest/review/abcdefghijklmn').status_code == 403

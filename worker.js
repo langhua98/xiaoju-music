@@ -1222,6 +1222,7 @@ const HELP = `我是小橘音乐的管理助手 🍊 常用的点下面的按钮
 找 歌名 —— 在小橘音乐里找这首，可以加进/移出歌单、删除
 统计 —— 歌库和这几天搬歌的情况
 贴一个网易云网址 —— 抓里面的歌（单曲、歌单、专辑、歌手、App 分享链接都行），先列给你过目，确认是我们的歌点通过才发进频道；后面可以加数量，比如「网址 30」
+爬 歌名或歌手 —— 不用网址，直接去网易云搜着抓，一样先列给你过目；可以加数量，比如「爬 小橘 30」
 搬运设置 —— 每次抓几首、搬到哪个歌单
 直接发歌名 —— 和听众一样找这首歌，库里没有就自动搬进来（新歌按类型自动进歌单）
 `;
@@ -1284,7 +1285,11 @@ async function botUpdate(env, update, origin) {
     if ((c = /^搬\s*@?(\w{4,64})(?:\s+(\d{1,4}))?\s*(?:首)?$/.exec(t))) return ownerCopy(env, chat, c[1], Number(c[2] || 50));
     if ((c = /^找\s*(.+)$/.exec(t))) return ownerFind(env, chat, c[1].trim(), origin);
     if (/^(统计|今天搬了多少|搬了多少)/.test(t)) return ownerStats(env, chat);
-    if ((c = /(https?:\/\/\S+)(?:\s+(\d{1,3}))?/.exec(t))) return ownerHarvest(env, chat, c[1], c[2] ? Number(c[2]) : 0, origin);
+    if ((c = /^爬\s*(.*?)(?:\s+(\d{1,3})\s*首?)?$/.exec(t))) {
+      if (!c[1]) return say(env, chat, '爬什么？发「爬 歌名或歌手」，比如「爬 小橘 30」');
+      return ownerHarvest(env, chat, { query: c[1].slice(0, 60) }, c[2] ? Number(c[2]) : 0, origin);
+    }
+    if ((c = /(https?:\/\/\S+)(?:\s+(\d{1,3}))?/.exec(t))) return ownerHarvest(env, chat, { url: c[1] }, c[2] ? Number(c[2]) : 0, origin);
     if (/^搬运设置$/.test(t)) return showHarvest(env, chat);
     if ((c = /^搬运数量\s*(\d{1,3})$/.exec(t))) return setHarvestLimit(env, chat, Number(c[1]));
     if ((c = /^搬运歌单\s*(.+)$/.exec(t))) return setHarvestPlaylist(env, chat, c[1].trim());
@@ -1466,7 +1471,7 @@ function harvestPanel(h) {
       '搬运设置', '',
       `每次最多抓：${h.limit} 首（发「搬运数量 30」改）`,
       `搬到歌单：${h.playlist || '按类型自动分'}（发「搬运歌单 纯音乐」或「搬运歌单 自动」改）`, '',
-      `支持：${Object.values(HARVEST_SITES).join('、')}。抓到的全部进审核单，你确认是我们自己的歌点「审核通过」才发进频道。`,
+      `支持：${Object.values(HARVEST_SITES).join('、')}（贴网址，或发「爬 歌名或歌手」去上面搜）。抓到的全部进审核单，你确认是我们自己的歌点「审核通过」才发进频道。`,
     ].join('\n'),
   };
 }
@@ -1503,26 +1508,28 @@ async function setHarvestPlaylist(env, chat, name) {
   return say(env, chat, `好的，搬来的歌都放进「${name}」${made ? '（新建了这个歌单）' : ''}`);
 }
 
-async function ownerHarvest(env, chat, url, n, origin) {
+// what：{url} 抓这个网址里的歌，或 {query} 去网站上按关键词搜
+async function ownerHarvest(env, chat, what, n, origin) {
   if (!streamerOn(env)) return say(env, chat, '搬运服务没配置');
   const L = lib(env), settings = await L.getHarvest();
   if (n) settings.limit = Math.max(1, Math.min(n, 200));
   let r;
   try {
     r = await streamerCall(env, '/harvest', {
-      url, settings: { ...settings, sites: Object.keys(HARVEST_SITES) }, notify: chat, link: origin,
+      ...what, settings: { ...settings, sites: Object.keys(HARVEST_SITES) }, notify: chat, link: origin,
       existing: (await L.listTracks()).map(t => [t.title, t.artist]),
     });
   } catch {
-    return say(env, chat, '搬运服务正在唤醒，过一两分钟再发一次网址');
+    return say(env, chat, `搬运服务正在唤醒，过一两分钟再发一次${what.query ? '' : '网址'}`);
   }
   if (r.status === 400) {
     const why = r.data.detail || '这个网址搬不了';
     return say(env, chat, `${why}。${/不支持/.test(why) ? '现在支持：' + Object.values(HARVEST_SITES).join('、') + '。想加别的网站跟我说。' : ''}`);
   }
   if (r.status === 409) return say(env, chat, '正在抓或发别的，等那边好了再来（好了会通知你）');
-  if (r.status !== 200) return say(env, chat, '搬运服务正在唤醒，过一两分钟再发一次网址');
-  return say(env, chat, `开始从${r.data.site || '这个网站'}抓，最多 ${settings.limit} 首。抓完发审核单给你，确认是我们的歌点通过才发进频道 👌`);
+  if (r.status !== 200) return say(env, chat, `搬运服务正在唤醒，过一两分钟再发一次${what.query ? '' : '网址'}`);
+  const where = r.data.site || '这个网站';
+  return say(env, chat, `${what.query ? `开始在${where}搜「${what.query}」` : `开始从${where}抓`}，最多 ${settings.limit} 首。抓完发审核单给你，确认是我们的歌点通过才发进频道 👌`);
 }
 
 // 频道主按了审核单的按钮：交给流式服务，通过的开始发；审核单改成审过的样子、去掉按钮
@@ -1578,7 +1585,7 @@ body{font:15px/1.6 system-ui,sans-serif;margin:0;background:#fff;color:#222}main
 h1{font-size:18px}li{margin:0 0 12px;word-break:break-all}.m{color:#888;font-size:13px}a{color:#e8730c}
 @media(prefers-color-scheme:dark){body{background:#111;color:#ddd}}
 </style></head><body><main><h1>🛂 审核单 ${esc(b.id)}（${esc(b.site)}，${(b.tracks || []).length} 首，确认是不是我们的歌，${esc(state)}）</h1>
-<p class="m">网址：<a href="${href(b.url)}" target="_blank" rel="noopener noreferrer">${esc(b.url)}</a><br>
+<p class="m">${b.query ? `搜：${esc(b.query)}` : `网址：<a href="${href(b.url)}" target="_blank" rel="noopener noreferrer">${esc(b.url)}</a>`}<br>
 逐个核对，全是我们自己的歌再回机器人点「✅ 审核通过」，整批一起；有不是我们的就点「❌ 审核失败」。</p><ol>${rows}</ol></main></body></html>`;
   return html(page, method, { 'X-Robots-Tag': 'noindex', 'Cache-Control': 'no-store' });
 }
