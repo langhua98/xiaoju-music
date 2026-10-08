@@ -26,6 +26,7 @@ import asyncio
 import base64
 import hmac
 import io
+import json
 import logging
 import os
 import re
@@ -48,6 +49,7 @@ from telethon.sessions import StringSession
 from harvest.job import Harvester
 from harvest.net import Http
 from harvest.sites import ADAPTERS as HARVEST_SITES, NetEase
+from harvest.upload import UploadError
 
 # MTProto 每次最多取 512 KB；起点按它对齐，Telegram 才接受
 CHUNK = 512 * 1024
@@ -937,6 +939,47 @@ async def netease_login_start(request: Request):
         netease_login_task.cancel()
     netease_login_task = asyncio.create_task(netease_login(body.get('notify')))
     return {'ok': True}
+
+@app.post('/netease/check')
+async def netease_check(request: Request):
+    """{cookie, alts: [主页网址]} → 自检：网易云登录了没有（昵称、会员）、用这个账号试下载小号热门歌前 3 首（完整还是试听、多少 k）、
+    频道主账号能不能往频道发帖。结果也写进日志（不含 cookie），排查时看 Space 日志就行"""
+    check_key(request)
+    body = await request.json()
+    cookie = str(body.get('cookie') or '')
+    ne, http = NetEase(), Http(gap=0.2)
+    out = {'login': False, 'nickname': '', 'vip': None, 'songs': [], 'channel': None, 'error': ''}
+    try:
+        if cookie:
+            acc = await http.get_json(ne.api + '/user/account', {'cookie': cookie, 'timestamp': str(time.time_ns())})
+            prof = acc.get('profile') or {}
+            out.update(login=bool(prof), nickname=prof.get('nickname') or '', vip=(acc.get('account') or {}).get('vipType'))
+        for url in [str(u) for u in body.get('alts') or []][:1]:
+            n = 0
+            async for t in ne.hot(url, http):
+                if n >= 3:
+                    break
+                n += 1
+                row = {'title': t.title}
+                try:
+                    got = await ne.download(t, http, cookie)
+                    row.update(ok=True, size=got.size, ext=got.ext)
+                except UploadError as e:
+                    row.update(ok=False, why=str(e))
+                out['songs'].append(row)
+    except Exception as e:  # noqa: BLE001
+        out['error'] = f'{type(e).__name__}: {e}'[:200]
+    try:
+        if user_client is None:
+            out['channel'] = {'ok': False, 'why': '频道主账号没登录'}
+        else:
+            ch = await user_client.get_entity(target_channel())
+            perm = await user_client.get_permissions(ch, 'me')
+            out['channel'] = {'ok': bool(perm.is_creator or (perm.is_admin and perm.post_messages)), 'title': getattr(ch, 'title', '')}
+    except Exception as e:  # noqa: BLE001
+        out['channel'] = {'ok': False, 'why': f'{type(e).__name__}: {e}'[:200]}
+    log.info('self-check: %s', json.dumps(out, ensure_ascii=False))
+    return out
 
 @app.get('/netease/session')
 async def netease_session_get(request: Request):

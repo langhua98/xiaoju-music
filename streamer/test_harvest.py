@@ -514,6 +514,35 @@ def test_harvest_endpoints(monkeypatch):
     assert c.post('/harvest/review', json={'id': 'x', 'ok': True, 'channel': 'bad name!'}, headers=key).status_code == 400
 
 
+def test_netease_check_reports_login_downloads_and_channel(monkeypatch):
+    monkeypatch.setenv('STREAMER_KEY', 'k1')
+
+    class Http:
+        def __init__(self, **kw):
+            pass
+
+        async def get_json(self, url, params=None):
+            path = url.split('3017', 1)[1]
+            if path == '/user/account':
+                return {'code': 200, 'profile': {'nickname': '小橘'}, 'account': {'vipType': 0}}
+            if path == '/artist/top/song':
+                return {'code': 200, 'songs': [ne_song(1, '甲', ['小橘']), ne_song(2, '乙', ['小橘'])]}
+            if path == '/song/url/v1':
+                if params['id'] == '1':
+                    return {'code': 200, 'data': [{'id': 1, 'url': 'http://cdn/1.mp3', 'size': 9, 'type': 'mp3'}]}
+                return {'code': 200, 'data': [{'id': 2, 'url': 'http://cdn/2.mp3', 'freeTrialInfo': {'end': 30}}]}
+            raise AssertionError(path)
+
+    monkeypatch.setattr(appmod, 'Http', Http)
+    monkeypatch.setattr(appmod, 'user_client', None)
+    c = TestClient(appmod.app)
+    assert c.post('/netease/check', json={}).status_code == 403
+    r = c.post('/netease/check', json={'cookie': 'MUSIC_U=x', 'alts': ['https://music.163.com/artist?id=9']}, headers={'X-Key': 'k1'}).json()
+    assert (r['login'], r['nickname'], r['vip']) == (True, '小橘', 0)
+    assert [x['ok'] for x in r['songs']] == [True, False] and '试听片段' in r['songs'][1]['why']
+    assert r['channel'] == {'ok': False, 'why': '频道主账号没登录'}
+
+
 def test_bot_say_turns_buttons_into_inline_buttons(monkeypatch):
     sent = []
 

@@ -141,7 +141,7 @@ globalThis.fetch = async (input, init = {}) => {
     return Response.json({ code: 200, lrc: { version: 1, lyric: neteaseLyrics.get(Number(m[1])) || '' } });
   }
   // 机器人要用的流式服务接口：记下收到的请求，按 bot 里设好的回
-  if ((m = url.match(/^https:\/\/streamer\.example\/(fulfill|copy\/start|copy\/pick|auto\/start|auto\/status|search\/global|harvest|harvest\/count|harvest\/describe|harvest\/alts|harvest\/review(?:\/[a-z0-9]+)?|netease\/login|netease\/session)(?:\?(.*))?$/)) || url === STREAMER + '/') {
+  if ((m = url.match(/^https:\/\/streamer\.example\/(fulfill|copy\/start|copy\/pick|auto\/start|auto\/status|search\/global|harvest|harvest\/count|harvest\/describe|harvest\/alts|harvest\/review(?:\/[a-z0-9]+)?|netease\/login|netease\/session|netease\/check)(?:\?(.*))?$/)) || url === STREAMER + '/') {
     if (bot.streamerDown) throw new TypeError('fetch failed');
     if (url === STREAMER + '/') return Response.json({ ok: true });
     assert.equal(headers.get('X-Key'), SKEY);
@@ -156,6 +156,7 @@ globalThis.fetch = async (input, init = {}) => {
     if (m[1] === 'harvest/describe') return Response.json(bot.describe || {});
     if (m[1] === 'harvest/alts') return bot.harvestBusy ? Response.json({ detail: bot.harvestBusy }, { status: 409 }) : Response.json({ ok: true });
     if (m[1] === 'netease/session') return Response.json(bot.netease || {});
+    if (m[1] === 'netease/check') return Response.json(bot.check || { login: false, songs: [], channel: { ok: true, title: '小橘🍊音乐' } });
     if (m[1].startsWith('harvest/review/')) return bot.sheet ? Response.json(bot.sheet) : Response.json({ detail: 'no such sheet' }, { status: 404 });
     if (m[1] === 'harvest') {
       if (/example\.com/.test(body.url)) return Response.json({ detail: '这个网站还不支持' }, { status: 400 });
@@ -955,6 +956,18 @@ await t('贴网址搬运：搬运设置可以开关网站和授权、改数量�
   await dm(OWNER, '同步小号');
   assert.match(lastSay().text, /上一单还没做完：正在同步小号：在找新歌/);
   bot.harvestBusy = null;
+  // 自检：查登录、试下载小号热门歌、看频道能不能发；结果也在「搬运设置」里
+  bot.check = { login: true, nickname: '小橘', vip: 0, songs: [{ title: '甲', ok: true, size: 9, ext: 'mp3' }, { title: '乙', ok: false, why: '网易云只给试听片段（会员过期了？续上再发「网易云登录」）' }], channel: { ok: true, title: '小橘🍊音乐' } };
+  await dm(OWNER, '自检');
+  const chk = bot.toStreamer.filter(x => x.path === 'netease/check').at(-1);
+  assert.deepEqual(chk.body.alts, ['https://music.163.com/artist?id=9', 'https://music.163.com/artist?id=10']);
+  assert.equal(typeof chk.body.cookie, 'string', '带上存着的网易云账号（这里还没登录，是空的）');
+  assert.match(lastSay().text, /· 网易云：已登录「小橘」\n· 试下载小号热门歌 2 首：1 首能下完整的；乙：网易云只给试听片段/);
+  assert.match(lastSay().text, /· 频道：能往「小橘🍊音乐」发帖/);
+  assert.ok(!lastSay().text.includes('secretcookie'));
+  await dm(OWNER, '搬运设置');
+  assert.match(lastSay().text, /自检（[\d- :]+）：\n· 网易云：已登录「小橘」/);
+  bot.check = null;
   await dm(OWNER, '删除小号 2');
   assert.match(lastSay().text, /删掉了小号「朋友」/);
   await dm(OWNER, '删除小号 5');

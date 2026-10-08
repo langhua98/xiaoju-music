@@ -90,7 +90,10 @@ export default {
   // 每天北京时间凌晨 3 点（UTC 19:00）：自动去来源频道搬新歌
   async scheduled(controller, env, ctx) {
     // 每分钟一次：后台补封面、歌词；每天一次（北京时间凌晨 3 点）：夜里自动搬
-    if (controller.cron === FILL_CRON) ctx.waitUntil(fillMissing(env).catch(() => {}));
+    if (controller.cron === FILL_CRON) {
+      ctx.waitUntil(fillMissing(env).catch(() => {}));
+      ctx.waitUntil(selfCheck(env, false).catch(() => {}));
+    }
     else ctx.waitUntil(nightly(env).catch(() => {}));
   },
   async fetch(request, env, ctx) {
@@ -407,6 +410,42 @@ async function viz(env, id) {
   return new Response(fromBase64(b64), {
     headers: cors({ 'Content-Type': 'application/octet-stream', 'Cache-Control': 'public, max-age=2592000' }),
   });
+}
+
+// ── 自检（每小时一次，也可以私聊机器人发「自检」）：网易云登录了没有、用它试下载小号热门歌、频道主账号能不能往频道发帖 ──
+// 结果存在 config 的 health，「搬运设置」里显示；流式服务也写进日志
+const CHECK_EVERY_MS = 60 * 60 * 1000;
+
+async function selfCheck(env, force) {
+  const L = lib(env);
+  const last = JSON.parse((await L.getConfig('health')) || '{}');
+  if (!force && Date.now() - (last.at || 0) < CHECK_EVERY_MS) return last;
+  if (!streamerOn(env)) return last;
+  await L.setConfig('health', JSON.stringify({ ...last, at: Date.now() }));  // 先占住，免得下一分钟又跑一遍
+  const r = await streamerCall(env, '/netease/check', {
+    cookie: (await neteaseAccount(env)).cookie || '', alts: (await getAlts(env)).map(a => a.url),
+  });
+  if (r.status !== 200) return last;
+  const health = { ...r.data, at: Date.now() };
+  await L.setConfig('health', JSON.stringify(health));
+  return health;
+}
+
+function healthLines(h) {
+  if (!h || !h.at || h.login === undefined) return ['自检：还没跑过（每小时自动跑；发「自检」现在跑）'];
+  const when = new Date(h.at + 8 * 3600e3).toISOString().slice(5, 16).replace('T', ' ');
+  const lines = [`自检（${when}）：`];
+  lines.push(h.login ? `· 网易云：已登录「${h.nickname}」` : '· 网易云：没登录或登录过期了，VIP 歌下不了（发「网易云登录」扫码）');
+  if (h.songs && h.songs.length) {
+    const ok = h.songs.filter(x => x.ok);
+    lines.push(`· 试下载小号热门歌 ${h.songs.length} 首：${ok.length} 首能下完整的` +
+      (ok.length < h.songs.length ? `；${h.songs.filter(x => !x.ok).map(x => `${x.title}：${x.why}`).join('；')}` : ''));
+  } else if (h.login) {
+    lines.push('· 试下载：还没加小号，没歌可试');
+  }
+  if (h.channel) lines.push(h.channel.ok ? `· 频道：能往「${h.channel.title}」发帖` : `· 频道：发不了帖（${h.channel.why || '频道主账号不是管理员'}）`);
+  if (h.error) lines.push(`· 出错：${h.error}`);
+  return lines;
 }
 
 // ── 后台补封面、歌词：每分钟挑一批还没找过（或该再找）的歌先找好存起来，打开时直接就有 ──
@@ -1334,6 +1373,7 @@ const HELP = `我是小橘音乐的管理助手 🍊 常用的点下面的按钮
 搬运设置 —— 每次抓几首、搬到哪个歌单、先发到测试频道还是正式频道
 网易云登录 —— 扫码登录小橘音乐的网易云会员账号，VIP 歌才下得到；会员过期了续上再发一次
 补封面 / 补歌词 —— 没有专辑封面、没有歌词的歌重新找一遍（封面先找网易云的专辑图）
+自检 —— 查网易云登录、试下载小号的歌、看频道能不能发帖（每小时也自动查，结果在「搬运设置」里）
 直接发歌名 —— 和听众一样找这首歌，库里没有就自动搬进来（新歌按类型自动进歌单）
 `;
 
@@ -1402,6 +1442,14 @@ async function botUpdate(env, update, origin) {
     }
     if ((c = /(https?:\/\/\S+)(?:\s+(\d{1,3}))?/.exec(t))) return ownerLink(env, chat, c[1], c[2] ? Number(c[2]) : 0, origin);
     if (t === '小号') return say(env, chat, await altsText(env));
+    if (t === '自检') {
+      if (!streamerOn(env)) return say(env, chat, '搬运服务没配置');
+      await say(env, chat, '自检中：查网易云登录、试下载小号热门歌、看频道能不能发帖……');
+      let h;
+      try { h = await selfCheck(env, true); } catch { h = null; }
+      if (!h || h.login === undefined) return say(env, chat, '搬运服务正在唤醒，过一两分钟再发「自检」');
+      return say(env, chat, healthLines(h).join('\n'));
+    }
     if (t === '补封面') {
       const n = await lib(env).clearNonArtCovers();
       listCache = null;
@@ -1619,6 +1667,7 @@ function harvestPanel(h, env, ne = {}) {
 
 async function showHarvest(env, chat) {
   const p = harvestPanel(await lib(env).getHarvest(), env, await neteaseAccount(env));
+  p.text += '\n\n' + healthLines(JSON.parse((await lib(env).getConfig('health')) || '{}')).join('\n');
   return tg(env, 'sendMessage', { chat_id: chat, ...p, disable_web_page_preview: true });
 }
 
