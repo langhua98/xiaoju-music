@@ -74,6 +74,22 @@ class Harvester:
         except Exception:  # noqa: BLE001
             log.exception('notify failed')
 
+    # ── 数歌：抓之前先看这个网址里一共几首、库里已有几首 ──
+
+    async def count(self, url, settings, existing, http=None, most=1000):
+        """→ {site, kind, name, total, have}。kind：song / album / playlist / artist（见适配器的 describe）。
+        最多数 most 首。网址不支持或网站关着抛 ValueError"""
+        adapter, why = self.check_url(url, settings)
+        if adapter is None:
+            raise ValueError(why)
+        http = http or self.http
+        kind, name = await adapter.describe(url, http) if hasattr(adapter, 'describe') else ('', '')
+        seen = {norm(t) + '|' + norm(a) for t, a in existing}
+        keys = set()
+        async for t in adapter.items(url, most, http):
+            keys.add(song_key(t))  # 同一首重复出现只算一次
+        return {'site': adapter.name, 'kind': kind, 'name': name, 'total': len(keys), 'have': len(keys & seen)}
+
     # ── 抓取：网址里的歌 → 审核单 ──
 
     def start(self, url, settings, existing, notify=None, link='', query=''):

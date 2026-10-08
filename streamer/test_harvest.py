@@ -76,6 +76,31 @@ def test_netease_song_album_playlist_artist_and_short_link():
         collect(NetEase(NE), 'https://music.163.com/album?id=6', http)
 
 
+def test_netease_user_homepage_is_the_musician_and_counting(monkeypatch):
+    pages = {
+        NE + '/user/detail?uid=77': {'code': 200, 'profile': {'nickname': '小橘', 'artistId': 9}},
+        NE + '/user/detail?uid=78': {'code': 200, 'profile': {'nickname': '路人'}},
+        NE + '/artist/detail?id=9': {'code': 200, 'data': {'artist': {'name': '小橘', 'musicSize': 3}}},
+        NE + '/artist/songs?id=9&limit=50&offset=0&order=time': {'code': 200, 'more': False, 'songs': [
+            ne_song(41, '新歌', ['小橘']), ne_song(42, '旧歌', ['小橘']), ne_song(43, '新歌', ['小橘'])]},
+        NE + '/album?id=5': {'code': 200, 'album': {'name': '晴天'}, 'songs': [ne_song(21, '一', ['小橘'])]},
+    }
+    http = FakeHttp(pages)
+    home = 'https://music.163.com/#/user/home?id=77'
+    assert [t.title for t in collect(NetEase(NE), home, http)] == ['新歌', '旧歌', '新歌']
+    assert asyncio.run(NetEase(NE).describe(home, http)) == ('artist', '小橘')
+    assert asyncio.run(NetEase(NE).describe('https://music.163.com/album?id=5', http)) == ('album', '晴天')
+    with pytest.raises(ValueError, match='不是音乐人'):
+        collect(NetEase(NE), 'https://music.163.com/#/user/home?id=78', http)
+
+    monkeypatch.setattr('harvest.job.find_adapter', lambda url: NetEase(NE))
+    h = Harvester(http=http, send=None)
+    got = asyncio.run(h.count(home, SETTINGS, [('旧歌', '小橘')]))
+    assert got == {'site': '网易云音乐 music.163.com', 'kind': 'artist', 'name': '小橘', 'total': 2, 'have': 1}, '重复的只算一次'
+    with pytest.raises(ValueError, match='关着'):
+        asyncio.run(h.count(home, {'sites': []}, []))
+
+
 def test_netease_search_pages_until_limit_or_end():
     pages = {
         NE + '/cloudsearch?keywords=小橘&limit=3&offset=0&type=1': {'code': 200, 'result': {'songCount': 5, 'songs': [
@@ -403,6 +428,8 @@ def test_harvest_endpoints(monkeypatch):
     r = c.post('/harvest', json={'query': '小橘', 'settings': {'sites': []}}, headers=key)
     assert r.status_code == 400 and r.json()['detail'] == '没有开着的能搜歌的网站'
     assert c.get('/harvest/status', headers=key).json() == {'status': 'idle'}
+    assert c.post('/harvest/count', json={'url': 'https://music.example.com/x', 'settings': SETTINGS}, headers=key).json()['detail'] == '这个网站还不支持'
+    assert c.post('/harvest/count', json={'url': 'x'}).status_code == 403
     assert c.get('/harvest/review/abcdefghijklmn', headers=key).status_code == 404
     assert c.get('/harvest/review/abcdefghijklmn').status_code == 403
     r = c.post('/harvest/review', json={'id': 'abcdefghijklmn', 'ok': True}, headers=key)

@@ -51,15 +51,39 @@ class NetEase:
             raise RuntimeError(f'网易云接口 {path} 出错（code {d.get("code") if isinstance(d, dict) else "?"}）')
         return d
 
-    async def items(self, url, limit, http):
-        """支持单曲、歌单、专辑、歌手（song / playlist / album / artist?id=…，网页版带 #/ 的也行），
-        和 App 分享的 163cn.tv 短链接。"""
+    async def _parse(self, url, http):
+        """网址 → (类型, 编号)：song / playlist / album / artist；用户主页（音乐人）换成他的歌手编号。认不出 → (None, None)"""
         if (urlparse(url).hostname or '').lower().endswith('163cn.tv'):
             url = await http.final_url(url)
-        m = re.search(r'/(song|playlist|album|artist)\b[^#]*?[?&]id=(\d+)', url)
+        m = re.search(r'/(song|playlist|album|artist|user)\b[^#]*?[?&]id=(\d+)', url)
         if not m:
-            return
+            return None, None
         kind, sid = m.group(1), m.group(2)
+        if kind == 'user':
+            aid = ((await self._get(http, '/user/detail', uid=sid)).get('profile') or {}).get('artistId')
+            if not aid:
+                raise ValueError('这个网易云用户不是音乐人，主页上没有自己的歌')
+            kind, sid = 'artist', str(aid)
+        return kind, sid
+
+    async def describe(self, url, http):
+        """数歌之前先看这是什么：→ (类型, 名字)。类型：song 单曲 / album 专辑 / playlist 歌单 / artist 歌手主页"""
+        kind, sid = await self._parse(url, http)
+        name = ''
+        if kind == 'artist':
+            name = (((await self._get(http, '/artist/detail', id=sid)).get('data') or {}).get('artist') or {}).get('name') or ''
+        elif kind == 'album':
+            name = ((await self._get(http, '/album', id=sid)).get('album') or {}).get('name') or ''
+        elif kind == 'playlist':
+            name = ((await self._get(http, '/playlist/detail', id=sid)).get('playlist') or {}).get('name') or ''
+        return kind, _text(name)
+
+    async def items(self, url, limit, http):
+        """支持单曲、歌单、专辑、歌手主页、用户主页（song / playlist / album / artist / user/home?id=…，
+        网页版带 #/ 的也行），和 App 分享的 163cn.tv 短链接。"""
+        kind, sid = await self._parse(url, http)
+        if not kind:
+            return
         if kind == 'song':
             songs = (await self._get(http, '/song/detail', ids=sid)).get('songs') or []
         elif kind == 'album':

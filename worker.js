@@ -1223,7 +1223,7 @@ const HELP = `我是小橘音乐的管理助手 🍊 常用的点下面的按钮
 搬 @频道名 100 —— 从这个频道搬 100 首中文歌（查重），搬完告诉你
 找 歌名 —— 在小橘音乐里找这首，可以加进/移出歌单、删除
 统计 —— 歌库和这几天搬歌的情况
-贴一个网易云网址 —— 抓里面的歌（单曲、歌单、专辑、歌手、App 分享链接都行），先列给你过目，确认是我们的歌点通过才发进频道；后面可以加数量，比如「网址 30」
+贴一个网易云网址 —— 抓里面的歌（单曲、歌单、专辑、歌手主页、用户主页、App 分享链接都行），先列给你过目，确认是我们的歌点通过才发进频道；专辑、歌单、主页会先告诉你一共几首、已有几首，点按钮选抓多少；后面直接加数量就不问了，比如「网址 30」
 爬 歌名或歌手 —— 不用网址，直接去网易云搜着抓，一样先列给你过目；可以加数量，比如「爬 小橘 30」
 搬运设置 —— 每次抓几首、搬到哪个歌单、先发到测试频道还是正式频道
 网易云登录 —— 扫码登录小橘音乐的网易云会员账号，VIP 歌才下得到；会员过期了续上再发一次
@@ -1292,7 +1292,9 @@ async function botUpdate(env, update, origin) {
       if (!c[1]) return say(env, chat, '爬什么？发「爬 歌名或歌手」，比如「爬 小橘 30」');
       return ownerHarvest(env, chat, { query: c[1].slice(0, 60) }, c[2] ? Number(c[2]) : 0, origin);
     }
-    if ((c = /(https?:\/\/\S+)(?:\s+(\d{1,3}))?/.exec(t))) return ownerHarvest(env, chat, { url: c[1] }, c[2] ? Number(c[2]) : 0, origin);
+    if ((c = /(https?:\/\/\S+)(?:\s+(\d{1,3}))?/.exec(t))) {
+      return c[2] ? ownerHarvest(env, chat, { url: c[1] }, Number(c[2]), origin) : harvestCount(env, chat, c[1], origin);
+    }
     if (/^搬运设置$/.test(t)) return showHarvest(env, chat);
     if ((c = /^搬运数量\s*(\d{1,3})$/.exec(t))) return setHarvestLimit(env, chat, Number(c[1]));
     if ((c = /^搬运歌单\s*(.+)$/.exec(t))) return setHarvestPlaylist(env, chat, c[1].trim());
@@ -1416,6 +1418,13 @@ async function botButton(env, cb, owner, origin) {
   const [kind, a, b] = String(cb.data || '').split(':');
   const L = lib(env);
   if (kind === 'hv') return harvestDecide(env, cb, a === 'ok', ack);
+  if (kind === 'hk') { // 数完歌，按了「抓 N 首」
+    const ask = JSON.parse((await L.getConfig('harvestAsk')) || '{}');
+    if (!ask.url) return ack('这条过期了，重新发一次网址');
+    await ack();
+    if (cb.message) await tg(env, 'editMessageReplyMarkup', { chat_id: chat, message_id: cb.message.message_id, reply_markup: { inline_keyboard: [] } });
+    return ownerHarvest(env, chat, { url: ask.url }, Number(a) || 0, origin);
+  }
   if (kind === 'p') { // 搬搜到的那首
     await ack('搬运中…');
     try {
@@ -1575,6 +1584,35 @@ async function ownerHarvest(env, chat, what, n, origin) {
   if (r.status !== 200) return say(env, chat, `搬运服务正在唤醒，过一两分钟再发一次${what.query ? '' : '网址'}`);
   const where = r.data.site || '这个网站';
   return say(env, chat, `${what.query ? `开始在${where}搜「${what.query}」` : `开始从${where}抓`}，最多 ${settings.limit} 首。抓完发审核单给你，确认是我们的歌点通过才发进频道 👌`);
+}
+
+// 贴了专辑、歌单、歌手主页、用户主页的网址（没写数量）：先请流式服务数一数一共几首、库里已有几首，按按钮再抓。
+// 单曲直接抓；数不了（服务在睡、太慢）就照旧直接抓
+const KIND_NAME = { album: '专辑', playlist: '歌单', artist: '歌手主页' };
+
+async function harvestCount(env, chat, url, origin) {
+  if (!streamerOn(env)) return say(env, chat, '搬运服务没配置');
+  const L = lib(env), settings = await L.getHarvest();
+  let r;
+  try {
+    r = await streamerCall(env, '/harvest/count', {
+      url, settings: { ...settings, sites: Object.keys(HARVEST_SITES) },
+      existing: (await L.listTracks()).map(t => [t.title, t.artist]),
+    });
+  } catch {
+    return ownerHarvest(env, chat, { url }, 0, origin);
+  }
+  if (r.status === 400) return ownerHarvest(env, chat, { url }, 0, origin);  // 网址不支持之类：原样走一遍，报同样的原因
+  const d = r.data || {};
+  if (r.status !== 200 || !KIND_NAME[d.kind]) return ownerHarvest(env, chat, { url }, 0, origin);
+  const left = d.total - d.have;
+  const head = `${KIND_NAME[d.kind]}${d.name ? `「${d.name}」` : ''}：一共 ${d.total} 首${d.total >= 1000 ? '（只数了前 1000 首）' : ''}，小橘音乐里已有 ${d.have} 首，没搬的 ${left} 首。`;
+  if (!left) return say(env, chat, `${head}\n都搬过了 👌`);
+  await L.setConfig('harvestAsk', JSON.stringify({ url, at: Date.now() }));
+  const all = Math.min(left, 200);
+  const buttons = [{ text: `抓 ${Math.min(settings.limit, all)} 首`, callback_data: `hk:${Math.min(settings.limit, all)}` }];
+  if (all > settings.limit) buttons.push({ text: left > 200 ? '抓 200 首（一次最多）' : `全部 ${all} 首`, callback_data: `hk:${all}` });
+  return say(env, chat, `${head}\n要抓多少？抓到的照样先进审核单，确认是我们的歌再发。也可以发「网址 数量」自己定。`, [buttons]);
 }
 
 // 频道主按了审核单的按钮：交给流式服务，通过的开始发；审核单改成审过的样子、去掉按钮

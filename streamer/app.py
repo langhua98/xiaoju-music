@@ -777,6 +777,23 @@ async def harvest_start(request: Request):
         raise HTTPException(409, 'already running')
     return {'ok': True, 'site': harvester.state.get('site')}
 
+@app.post('/harvest/count')
+async def harvest_count(request: Request):
+    """{url, settings, existing} → {site, kind, name, total, have}：抓之前先数一数（不出审核单）。网址不支持 → 400"""
+    check_key(request)
+    if harvester is None:
+        raise HTTPException(409, 'not ready')
+    body = await request.json()
+    url = str(body.get('url') or '').strip()
+    if not re.match(r'^https?://', url):
+        raise HTTPException(400, '不是网址')
+    existing = [(str(t), str(a)) for t, a in body.get('existing', [])]
+    try:
+        # 自己的 Http，请求间隔短一些：Worker 等不了太久（几百首要翻十几页）
+        return await harvester.count(url, body.get('settings') or {}, existing, http=Http(gap=0.2))
+    except ValueError as e:
+        raise HTTPException(400, str(e))
+
 @app.get('/harvest/status')
 async def harvest_status(request: Request):
     check_key(request)
