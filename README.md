@@ -143,6 +143,7 @@ Space 的 `Dockerfile`、`requirements.txt` 归视频仓库管：音乐要加新
    ```
 
    `page.html`、`admin.html` 以 `text/plain` 上传，就是 Workers 的文本模块，`worker.js` 里 `import` 进来当字符串用。
+   或者在 GitHub 的 Actions 里跑 **Deploy worker**（先跑 `node test.mjs`，过了才用同样的 curl 部署；要仓库 secret `CLOUDFLARE_API_TOKEN`）。
    也可以在本目录用 `wrangler deploy`（`wrangler.toml` 已写好绑定、迁移和 `.html` 文本模块规则，secret 不受影响）。
 
 3. 改了流式服务：推到本仓库 `main` 后，去 xiaoju-video 的 Actions 跑 **Deploy streamer**（见上方「部署流式服务」）。

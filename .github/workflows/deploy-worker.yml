@@ -1,0 +1,30 @@
+# 把 worker.js、page.html、admin.html 部署到 Cloudflare Worker xiaoju-music（和 README「改完代码后」第 2 步的 curl 一样）。
+# 手动跑：Actions → Deploy worker → Run workflow。先跑本地测试，不过就不部署。
+# 需要仓库 secret CLOUDFLARE_API_TOKEN（用「Edit Cloudflare Workers」模板建）。线上的 secret 由 keep_bindings 保留。
+name: Deploy worker
+on:
+  workflow_dispatch:
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+      - run: node test.mjs
+      - name: Upload to Cloudflare
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+        run: |
+          if [ -z "$CLOUDFLARE_API_TOKEN" ]; then echo "缺少仓库 secret CLOUDFLARE_API_TOKEN"; exit 1; fi
+          ACC=aca35ff5f62ae4208757219dbc3b489b
+          KV=738216f3f7d64f1ab143128406d1b35e
+          STREAMER_URL=https://langhua1998-douyin-proxy.hf.space/m
+          curl -sS --fail-with-body -X PUT "https://api.cloudflare.com/client/v4/accounts/$ACC/workers/scripts/xiaoju-music" \
+            -H "Authorization: Bearer $CLOUDFLARE_API_TOKEN" \
+            -F "metadata={\"main_module\":\"worker.js\",\"compatibility_date\":\"2026-01-01\",\"keep_bindings\":[\"secret_text\"],\"bindings\":[{\"type\":\"kv_namespace\",\"name\":\"TRACKS\",\"namespace_id\":\"$KV\"},{\"type\":\"durable_object_namespace\",\"name\":\"LIB\",\"class_name\":\"Library\"},{\"type\":\"plain_text\",\"name\":\"CHANNEL_ID\",\"text\":\"-1003817921075\"},{\"type\":\"plain_text\",\"name\":\"CHANNEL_USERNAME\",\"text\":\"xiaojumusic\"},{\"type\":\"plain_text\",\"name\":\"STREAMER_URL\",\"text\":\"$STREAMER_URL\"}]};type=application/json" \
+            -F 'worker.js=@worker.js;type=application/javascript+module' \
+            -F 'page.html=@page.html;type=text/plain' \
+            -F 'admin.html=@admin.html;type=text/plain' \
+            | python3 -c 'import json,sys; d=json.load(sys.stdin); print("success:", d.get("success"), "| errors:", d.get("errors")); sys.exit(0 if d.get("success") else 1)'
