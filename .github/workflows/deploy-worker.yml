@@ -31,5 +31,5 @@ jobs:
           # 定时任务（和 wrangler.toml 的 crons 一样）：每天凌晨 3 点夜里自动搬；每分钟后台补封面、歌词
           curl -sS --fail-with-body -X PUT "https://api.cloudflare.com/client/v4/accounts/$ACC/workers/scripts/xiaoju-music/schedules" \
             -H "Authorization: Bearer $CLOUDFLARE_API_TOKEN" -H "Content-Type: application/json" \
-            -d '[{"cron":"0 19 * * *"},{"cron":"* * * * *"}]' \
+            -d '[{"cron":"0 19 * * *"},{"cron":"*/5 * * * *"}]' \
             | python3 -c 'import json,sys; d=json.load(sys.stdin); print("schedules:", [s.get("cron") for s in (d.get("result") or {}).get("schedules", [])], "| errors:", d.get("errors")); sys.exit(0 if d.get("success") else 1)'

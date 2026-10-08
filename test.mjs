@@ -1213,10 +1213,11 @@ await t('封面、歌词补全：没自带封面先用网易云的专辑封面�
   assert.equal(await lib.getLyrics(924), null);
   const runs = [];
   const tick = async cron => { await worker.scheduled({ cron }, env, { waitUntil: p => runs.push(p) }); await Promise.all(runs.splice(0)); };
-  for (let i = 0; i < 40 && (!(await lib.getCover(924)) || !(await lib.getLyrics(924))); i++) await tick('* * * * *');
+  for (let i = 0; i < 40 && (!(await lib.getCover(924)) || !(await lib.getLyrics(924))); i++) await tick('*/5 * * * *');
   assert.ok(await lib.getCover(924), '封面后台找好了');
   assert.ok(await lib.getLyrics(924), '歌词后台找好了');
-  assert.equal((await lib.missingArt(50, 50, Date.now())).covers.includes(924), false);
+  await lib.setConfig('fillCursor', '923');
+  assert.equal((await lib.missingArt(50, Date.now())).covers.includes(924), false);
   await dm(OWNER, '统计');
   assert.match(lastSay().text, /封面：专辑图 \d+ 首，频道图片 \d+ 首，没有 \d+ 首/);
   assert.match(lastSay().text, /歌词：带时间轴 \d+ 首，只有文字 \d+ 首，没有 \d+ 首/);

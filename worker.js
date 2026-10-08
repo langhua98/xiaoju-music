@@ -460,12 +460,14 @@ function healthLines(h) {
 }
 
 // ── 后台补封面、歌词：每分钟挑一批还没找过（或该再找）的歌先找好存起来，打开时直接就有 ──
-// 一批不大：免费版 Worker 一次最多 50 个子请求；连着出错（服务睡着、网易云抽风、子请求用完）就停，下一分钟接着来
-const FILL_CRON = '* * * * *';
+// 每 5 分钟按消息号顺序看下一段 FILL_BATCH 首（记着看到哪了，看到头再从头来）：只读几十行。
+// 别扫全库：免费版 Durable Object 每天只能读 500 万行，每分钟扫全库会把一天的额度用光，整个网站都读不了。
+// 一批不大：免费版 Worker 一次最多 50 个子请求；连着出错（服务睡着、网易云抽风）就停，下一轮接着来
+const FILL_CRON = '*/5 * * * *';
 const FILL_BATCH = 8;
 
 async function fillMissing(env) {
-  const { covers, lyrics: words } = await lib(env).missingArt(FILL_BATCH, FILL_BATCH, Date.now());
+  const { covers, lyrics: words } = await lib(env).missingArt(FILL_BATCH, Date.now());
   const jobs = [...covers.map(id => () => cover(env, id, false)), ...words.map(id => () => lyrics(env, id))];
   let done = 0, fails = 0;
   for (const job of jobs) {
@@ -1235,12 +1237,21 @@ export class Library extends DurableObject {
     return r.mime === 'none' ? { none: true } : { mime: r.mime, b64: r.data, own: !!r.own };
   }
 
-  // 后台补全挑的歌：还没封面的；还没找过歌词、或到了该再找的时候的（随机挑，免得老卡在同几首上）
-  async missingArt(nCovers, nLyrics, now) {
-    const covers = this.sql.exec('SELECT id FROM songs WHERE id NOT IN (SELECT id FROM covers) ORDER BY RANDOM() LIMIT ?', nCovers).toArray().map(r => r.id);
-    const lyrics = this.sql.exec(`SELECT id FROM songs WHERE id NOT IN (SELECT id FROM lyrics)
-      OR id IN (SELECT id FROM lyrics WHERE retry_at > 0 AND retry_at <= ?) ORDER BY RANDOM() LIMIT ?`, now, nLyrics).toArray().map(r => r.id);
-    return { covers, lyrics };
+  // 后台补全：按消息号顺序取接下来 n 首（游标存在 config 的 fillCursor，到头了从头来），挑出还没封面的、
+  // 还没找过歌词或到了该再找的。只按主键读这几行，不扫全库（免费版每天读的行数有限）
+  async missingArt(n, now) {
+    const cursor = Number(this.cfg('fillCursor') || 0);
+    let ids = this.sql.exec('SELECT id FROM songs WHERE id > ? ORDER BY id LIMIT ?', cursor, n).toArray().map(r => r.id);
+    if (!ids.length && cursor) ids = this.sql.exec('SELECT id FROM songs ORDER BY id LIMIT ?', n).toArray().map(r => r.id);
+    this.setCfg('fillCursor', String(ids.length === n ? ids[ids.length - 1] : 0));
+    if (!ids.length) return { covers: [], lyrics: [] };
+    const marks = ids.map(() => '?').join(',');
+    const hasCover = new Set(this.sql.exec(`SELECT id FROM covers WHERE id IN (${marks})`, ...ids).toArray().map(r => r.id));
+    const lyr = new Map(this.sql.exec(`SELECT id, retry_at FROM lyrics WHERE id IN (${marks})`, ...ids).toArray().map(r => [r.id, r.retry_at]));
+    return {
+      covers: ids.filter(id => !hasCover.has(id)),
+      lyrics: ids.filter(id => !lyr.has(id) || (lyr.get(id) > 0 && lyr.get(id) <= now)),
+    };
   }
 
   // 封面、歌词各有多少（统计用）
