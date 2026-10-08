@@ -127,6 +127,8 @@ export default {
       return text('Not Found', 404);
     } catch (e) {
       if (e instanceof HttpError) return text(e.message, e.status, e.headers);
+      // 真正的原因打进 Worker 日志（wrangler tail / 控制台能看），比如免费版 Durable Object 额度用完
+      console.log('error', method, path, String((e && e.stack) || e));
       return text('服务器出错了，请稍后再试', 500);
     }
   },
@@ -1006,6 +1008,8 @@ export class Library extends DurableObject {
       this.sql.exec('CREATE TABLE IF NOT EXISTS playlists (id INTEGER PRIMARY KEY, pos INTEGER NOT NULL, name TEXT NOT NULL, cover INTEGER NOT NULL DEFAULT 0, tracks TEXT NOT NULL)');
       // 别的频道的台标：搬来的歌自带的「封面」常是那个频道的标志，好多首共用同一张。记下来的图不再当封面
       this.sql.exec('CREATE TABLE IF NOT EXISTS logo_covers (data TEXT PRIMARY KEY)');
+      // 按图找封面（是不是台标、数几首共用）走索引，不扫整张 covers 表：免费版每天读的行数有限
+      this.sql.exec('CREATE INDEX IF NOT EXISTS covers_data ON covers (data)');
       // 音柱数据：base64；空字符串表示确定算不了
       this.sql.exec('CREATE TABLE IF NOT EXISTS viz (id INTEGER PRIMARY KEY, data TEXT NOT NULL)');
       // 听众求歌的记录（限次用）
@@ -1051,21 +1055,30 @@ export class Library extends DurableObject {
     this.sql.exec("DELETE FROM config WHERE k IN ('storage', 'storageTitle')");
   }
 
-  // art：这首有没有自己的专辑图（1 有 / 0 没有），封面还没判断过的不带。网页据此直接画文字封面，不用一首首去试
+  // art：这首有没有自己的专辑图（1 有 / 0 没有），封面还没判断过的不带。网页据此直接画文字封面，不用一首首去试。
+  // 整张表读一遍是「歌数 × 2」行，每次打开网页都读会用掉免费版每天的读取额度：结果记在内存里，
+  // songs、covers 一改（changed()）就作废
   async listTracks() {
-    return this.sql.exec('SELECT s.rec, c.mime, c.own FROM songs s LEFT JOIN covers c ON c.id = s.id ORDER BY s.id DESC').toArray().map(r => {
-      const t = summary(JSON.parse(r.rec));
-      if (r.mime != null) t.art = r.mime !== 'none' && r.own ? 1 : 0;
-      return t;
-    });
+    if (!this.tracks) {
+      this.tracks = this.sql.exec('SELECT s.rec, c.mime, c.own FROM songs s LEFT JOIN covers c ON c.id = s.id ORDER BY s.id DESC').toArray().map(r => {
+        const t = summary(JSON.parse(r.rec));
+        if (r.mime != null) t.art = r.mime !== 'none' && r.own ? 1 : 0;
+        return t;
+      });
+    }
+    return this.tracks;
+  }
+
+  changed() {
+    this.tracks = null;
   }
 
   // 歌单里有没有同一首歌（按整理后的歌名、歌手比，时长相差 3 秒以内；时长不知道的也算）
   async findSame(rec) {
     const want = summary(rec);
     const key = norm(want.title) + '|' + norm(want.artist);
-    for (const r of this.sql.exec('SELECT rec FROM songs WHERE id != ?', rec.id).toArray()) {
-      const t = summary(JSON.parse(r.rec));
+    for (const t of await this.listTracks()) {
+      if (t.id === rec.id) continue;
       if (norm(t.title) + '|' + norm(t.artist) === key && (!t.duration || !want.duration || Math.abs(t.duration - want.duration) <= 3)) return t.id;
     }
     return null;
@@ -1088,6 +1101,7 @@ export class Library extends DurableObject {
     this.sql.exec(`INSERT INTO songs (id, rec, updated) VALUES (?, ?, ?)
       ON CONFLICT(id) DO UPDATE SET rec = excluded.rec, updated = excluded.updated`,
       rec.id, JSON.stringify(rec), Date.now());
+    this.changed();
     return !old;
   }
 
@@ -1114,6 +1128,7 @@ export class Library extends DurableObject {
     this.sql.exec('DELETE FROM covers WHERE id = ?', id);
     this.sql.exec('DELETE FROM lyrics WHERE id = ?', id);
     this.sql.exec('DELETE FROM viz WHERE id = ?', id);
+    this.changed();
   }
 
   // 贴网址搬运的设置：每次最多抓几首、放进哪个歌单（空 = 按类型分）。以前存的 sites、licenses 不再用
@@ -1206,6 +1221,7 @@ export class Library extends DurableObject {
         n++;
       }
     }
+    this.changed();
     return n;
   }
 
@@ -1220,6 +1236,7 @@ export class Library extends DurableObject {
   markLogo(data) {
     this.sql.exec('INSERT OR IGNORE INTO logo_covers (data) VALUES (?)', data);
     this.sql.exec('DELETE FROM covers WHERE data = ?', data);
+    this.changed();
   }
 
   async getViz(id) {
@@ -1265,6 +1282,7 @@ export class Library extends DurableObject {
 
   // 补封面：用着频道图片、或记成没有封面的歌清掉封面，下次打开时重新找（会先找网易云的专辑封面）。返回清了几首
   async clearNonArtCovers() {
+    this.changed();
     return this.sql.exec("DELETE FROM covers WHERE own = 0 OR mime = 'none'").rowsWritten;
   }
 
@@ -1276,6 +1294,7 @@ export class Library extends DurableObject {
   async putCover(id, mime, data, own = 1) {
     this.sql.exec(`INSERT INTO covers (id, mime, data, own) VALUES (?, ?, ?, ?)
       ON CONFLICT(id) DO UPDATE SET mime = excluded.mime, data = excluded.data, own = excluded.own`, id, mime, data, own ? 1 : 0);
+    this.changed();
   }
 
   async addPhoto(id, fileId) {
