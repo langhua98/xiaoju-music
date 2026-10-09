@@ -956,7 +956,7 @@ async def netease_check(request: Request):
             out.update(login=bool(prof), nickname=prof.get('nickname') or '', vip=(acc.get('account') or {}).get('vipType'))
         for url in [str(u) for u in body.get('alts') or []][:1]:
             n = 0
-            async for t in ne.hot(url, http):
+            async for t in ne.hot(url, http, cookie):
                 if n >= 3:
                     break
                 n += 1
@@ -967,6 +967,8 @@ async def netease_check(request: Request):
                 except UploadError as e:
                     row.update(ok=False, why=str(e))
                 out['songs'].append(row)
+            if not n:
+                out['error'] = '小号主页没取到热门歌（网易云给了 0 首）'
     except Exception as e:  # noqa: BLE001
         out['error'] = f'{type(e).__name__}: {e}'[:200]
     try:

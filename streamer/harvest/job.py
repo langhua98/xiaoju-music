@@ -116,7 +116,7 @@ class Harvester:
                 raise ValueError(f'{a.get("name") or a["url"]}：{why}')
             adapters.append((adapter, a))
         self.state = self._fresh('direct', '', adapters[0][0].name if adapters else '')
-        self.state.update(channel=channel, alts=[a.get('name') or '' for _, a in adapters], have=0)
+        self.state.update(channel=channel, alts=[a.get('name') or '' for _, a in adapters], have=0, empty=[])
         seen = {norm(t) + '|' + norm(a) for t, a in existing}
         self.task = asyncio.create_task(self._direct(adapters, seen, notify, channel, cookie))
 
@@ -126,7 +126,7 @@ class Harvester:
             todo, queued = [], set()
             for adapter, alt in adapters:
                 hot = getattr(adapter, 'hot', None)
-                found = hot(alt['url'], self.http) if hot else adapter.items(alt['url'], ALT_MOST, self.http)
+                found = hot(alt['url'], self.http, cookie) if hot else adapter.items(alt['url'], ALT_MOST, self.http)
                 n = 0
                 async for t in found:
                     if n >= ALT_MOST:
@@ -138,6 +138,8 @@ class Harvester:
                     elif k not in queued:
                         queued.add(k)
                         todo.append((adapter, t))
+                if not n:  # 一首都没拿到：别当成「都在库里了」，要告诉频道主
+                    st['empty'].append(alt.get('name') or alt['url'])
             st['total'] = len(todo)
             await self._post_tracks(todo, seen, channel, cookie)
             st['status'] = 'done'
@@ -307,11 +309,15 @@ class Harvester:
             head = f'👥 同步小号{"「" + names + "」" if names else ""}：'
             if st['status'] == 'error':
                 head += f'出错了：{st["error"]}（已发 {st["copied"]} 首）'
+            elif not st['total'] and not st['have']:
+                head += f'网易云没给热门歌（{"、".join(st["empty"])} 一首都没拿到）。先发「自检」看网易云登录还在不在，过期了就发「网易云登录」重新扫码'
             elif not st['total']:
                 head += f'热门前 {ALT_MOST} 首都在小橘音乐里了（{st["have"]} 首）'
             else:
                 head += f'热门前 {ALT_MOST} 首里新歌 {st["total"]} 首，发进{where} {st["copied"]} 首' + (
                     f'，没发 {st["total"] - st["copied"]} 首' if st['total'] > st['copied'] else '') + (f'（{st["have"]} 首库里已有）' if st['have'] else '')
+            if st.get('empty') and (st['total'] or st['have']):
+                head += f'；{"、".join(st["empty"])} 没拿到热门歌'
         elif st['status'] == 'error':
             head = f'⚠️ 出错了：{st["error"]}' + ('' if crawl else f'（已发 {st["copied"]} 首）')
         elif not rows:

@@ -51,7 +51,7 @@ class NetEase:
             raise RuntimeError(f'网易云接口 {path} 出错（code {d.get("code") if isinstance(d, dict) else "?"}）')
         return d
 
-    async def _parse(self, url, http):
+    async def _parse(self, url, http, cookie=''):
         """网址 → (类型, 编号)：song / playlist / album / artist；用户主页（音乐人）换成他的歌手编号。认不出 → (None, None)"""
         if (urlparse(url).hostname or '').lower().endswith('163cn.tv'):
             url = await http.final_url(url)
@@ -60,7 +60,8 @@ class NetEase:
             return None, None
         kind, sid = m.group(1), m.group(2)
         if kind == 'user':
-            aid = ((await self._get(http, '/user/detail', uid=sid)).get('profile') or {}).get('artistId')
+            aid = ((await self._get(http, '/user/detail', uid=sid, **({'cookie': cookie} if cookie else {})))
+                   .get('profile') or {}).get('artistId')
             if not aid:
                 raise ValueError('这个网易云用户不是音乐人，主页上没有自己的歌')
             kind, sid = 'artist', str(aid)
@@ -102,12 +103,14 @@ class NetEase:
         for s in songs[:limit]:
             yield self._track(s)
 
-    async def hot(self, url, http):
-        """主页（歌手主页、音乐人的用户主页）的热门歌：网易云的「热门 50 首」。不是主页 → 什么也没有"""
-        kind, sid = await self._parse(url, http)
+    async def hot(self, url, http, cookie=''):
+        """主页（歌手主页、音乐人的用户主页）的热门歌：网易云的「热门 50 首」。不是主页 → 什么也没有。
+        cookie：频道主登录过的网易云账号。要带上：流式服务在海外机房，不登录去要，网易云常常给 0 首或者报错"""
+        kind, sid = await self._parse(url, http, cookie)
         if kind != 'artist':
             return
-        for s in (await self._get(http, '/artist/top/song', id=sid)).get('songs') or []:
+        login = {'cookie': cookie} if cookie else {}
+        for s in (await self._get(http, '/artist/top/song', id=sid, **login)).get('songs') or []:
             yield self._track(s)
 
     async def search(self, query, limit, http):
