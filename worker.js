@@ -64,6 +64,7 @@ const MSG = {
   waking: '大文件服务正在唤醒，大约 1 分钟后再试',
   noStreamer: '这首超过 20 MB，暂时不能在网页播放',
   gone: '频道里找不到这首了',
+  botDown: '⚠️ 出错了，多半是数据库今天的免费额度用完了（北京时间早上 8 点恢复）。网页还能听歌；搬歌、改歌单、求歌等恢复了再发一次。',
 };
 
 
@@ -93,6 +94,10 @@ export default {
     if (controller.cron === FILL_CRON) {
       // 结果打进 Worker 日志（wrangler tail / 控制台能看），不含 cookie
       ctx.waitUntil(fillMissing(env).then(r => console.log('fill', JSON.stringify(r)), e => console.log('fill failed', String(e))));
+      // 每小时（整点那一轮）给 KV 存一份快照，数据库挂了时网页靠它照样能听
+      if (new Date(controller.scheduledTime || Date.now()).getUTCMinutes() < 5) {
+        ctx.waitUntil(saveSnapshot(env).then(ok => console.log('snapshot', ok), e => console.log('snapshot failed', String(e))));
+      }
       ctx.waitUntil(selfCheck(env, false).then(h => console.log('self-check', JSON.stringify({ at: h.at, login: h.login, songs: h.songs, channel: h.channel, error: h.error })),
         e => console.log('self-check failed', String(e))));
     }
@@ -147,6 +152,19 @@ function streamerBase(env) {
   return env.STREAMER_URL.replace(/\/+$/, '');
 }
 
+// 机器人处理到一半出错（多半是数据库今天的额度用完了）：别一声不吭，告诉对方一声。只用 Bot API，不碰数据库
+async function botDown(env, update, e) {
+  console.log('bot error', String((e && e.stack) || e));
+  const cb = update.callback_query;
+  const chat = update.message ? update.message.chat.id : cb && cb.message && cb.message.chat.id;
+  try {
+    if (cb) await tg(env, 'answerCallbackQuery', { callback_query_id: cb.id, text: '' });
+    if (chat) await say(env, chat, MSG.botDown);
+  } catch {
+    // Telegram 也不通：算了
+  }
+}
+
 // ── Telegram webhook：登记频道里的音频 ──────────────────────────────
 
 async function webhook(request, env, ctx) {
@@ -156,7 +174,7 @@ async function webhook(request, env, ctx) {
   const update = await request.json().catch(() => null);
   // 私聊机器人（频道主管理、听众求歌）和按按钮：先回 200，慢慢处理（搜歌要好几秒，Telegram 等不了太久会重发）
   if (update && ((update.message && update.message.chat && update.message.chat.type === 'private') || update.callback_query)) {
-    const work = botUpdate(env, update, new URL(request.url).origin).catch(() => {});
+    const work = botUpdate(env, update, new URL(request.url).origin).catch(e => botDown(env, update, e));
     if (ctx && ctx.waitUntil) ctx.waitUntil(work); else await work;
     return text('ok');
   }
@@ -319,12 +337,25 @@ async function tracksFor(env) {
   });
 }
 
+async function listBody(env) {
+  const [tracks, playlists, hot] = await Promise.all([tracksFor(env), lib(env).listPlaylists(), lib(env).listHot()]);
+  return JSON.stringify({ channel: env.CHANNEL_USERNAME || '', tracks, playlists, hot: hotOrder(tracks, hot.songs), pics: hot.pics });
+}
+
 async function trackList(env) {
   const now = Date.now();
   if (!listCache || listCache.exp < now) {
-    const [tracks, playlists, hot] = await Promise.all([tracksFor(env), lib(env).listPlaylists(), lib(env).listHot()]);
-    const body = { channel: env.CHANNEL_USERNAME || '', tracks, playlists, hot: hotOrder(tracks, hot.songs), pics: hot.pics };
-    listCache = { body: JSON.stringify(body), exp: now + LIST_TTL_MS };
+    try {
+      listCache = { body: await listBody(env), exp: now + LIST_TTL_MS };
+    } catch (e) {
+      // 数据库读不了：给 KV 里最近一小时的快照，网页照样能打开、能听
+      const snap = env.TRACKS ? await env.TRACKS.get(SNAP_TRACKS).catch(() => null) : null;
+      if (!snap) throw e;
+      console.log('degraded: /api/tracks from snapshot', String(e));
+      return new Response(snap, {
+        headers: cors({ 'Content-Type': 'application/json; charset=utf-8', 'Cache-Control': 'public, max-age=60', 'X-Degraded': '1' }),
+      });
+    }
   }
   return new Response(listCache.body, {
     headers: cors({ 'Content-Type': 'application/json; charset=utf-8', 'Cache-Control': 'public, max-age=15' }),
@@ -334,10 +365,42 @@ async function trackList(env) {
 async function getRec(env, id) {
   const hit = recCache.get(id);
   if (hit && hit.exp > Date.now()) return hit.rec;
-  const rec = await lib(env).getTrack(id);
+  let rec;
+  try {
+    rec = await lib(env).getTrack(id);
+  } catch (e) {
+    const recs = await snapshotRecs(env);  // 数据库读不了：用快照里的文件信息照样放
+    if (!recs) throw e;
+    return recs[id] || null;
+  }
   if (recCache.size > 500) recCache.clear();
   recCache.set(id, { rec, exp: Date.now() + REC_TTL_MS });
   return rec;
+}
+
+// ── 数据库挂了时的兜底：KV 里的快照 ──
+// Durable Object 出错（多半是免费版每天 500 万行的读取额度用完了）时，网页照样能打开、能听：
+// 歌单 JSON 和每首歌的文件信息（file_id 等，只在服务端用）每小时存一份到 KV（TRACKS，原来只在 DO 第一次启动时迁数据用）。
+// KV 免费版每天只能写 1000 次：只在定时任务里每小时写两条（一天 48 次），绝不在请求里写。
+// KV 是全球同步的，比边缘缓存（只在一个机房、workers.dev 上不一定生效）靠得住。
+// 封面、歌词、音柱不进快照：挂的时候网页画文字封面、不显示歌词
+const SNAP_TRACKS = 'snapshot:tracks';
+const SNAP_RECS = 'snapshot:recs';
+let snapRecs = null;  // { recs, exp } 兜底时从 KV 读出来的文件信息：播放一首歌要请求好几次，记 10 分钟，省 KV 的读取次数
+
+async function saveSnapshot(env) {
+  if (!env.TRACKS || !env.TRACKS.put) return false;
+  const [body, recs] = await Promise.all([listBody(env), lib(env).listRecs()]);
+  await env.TRACKS.put(SNAP_TRACKS, body);
+  await env.TRACKS.put(SNAP_RECS, JSON.stringify(recs));
+  return true;
+}
+
+async function snapshotRecs(env) {
+  if (snapRecs && snapRecs.exp > Date.now()) return snapRecs.recs;
+  const recs = env.TRACKS ? await env.TRACKS.get(SNAP_RECS, 'json').catch(() => null) : null;
+  if (recs) snapRecs = { recs, exp: Date.now() + 600e3 };
+  return recs;
 }
 
 function forget(id) {
@@ -1163,17 +1226,45 @@ export class Library extends DurableObject {
   // songs、covers 一改（changed()）就作废
   async listTracks() {
     if (!this.tracks) {
-      this.tracks = this.sql.exec('SELECT s.rec, c.mime, c.own FROM songs s LEFT JOIN covers c ON c.id = s.id ORDER BY s.id DESC').toArray().map(r => {
-        const t = summary(JSON.parse(r.rec));
-        if (r.mime != null) t.art = r.mime !== 'none' && r.own ? 1 : 0;
-        return t;
-      });
+      this.recs = new Map();
+      this.tracks = this.sql.exec('SELECT s.rec, c.mime, c.own FROM songs s LEFT JOIN covers c ON c.id = s.id ORDER BY s.id DESC').toArray()
+        .map(r => this.trackRow(r));
     }
     return this.tracks;
   }
 
+  // 一行 songs（连着 covers）→ 网页要的那首；顺带记下放歌要的文件信息（快照用，见 saveSnapshot）
+  trackRow(r) {
+    const rec = JSON.parse(r.rec);
+    const t = summary(rec);
+    if (r.mime != null) t.art = r.mime !== 'none' && r.own ? 1 : 0;
+    const { id, file_id, size, mime, name, title } = rec;
+    this.recs.set(id, { id, file_id, size, mime, name, title });
+    return t;
+  }
+
+  // 快照用：{ 消息号: 放歌要的文件信息 }。和 listTracks 是同一次读，不多读
+  async listRecs() {
+    await this.listTracks();
+    return Object.fromEntries(this.recs);
+  }
+
   changed() {
     this.tracks = null;
+  }
+
+  // 只改了一首：歌表在内存里就只重读这一首（一两行），不把整张表作废。同步小号一口气发几十首时，
+  // 每发一首都整表重读（几千行）会很快用光免费版每天的读取额度
+  touched(id) {
+    if (!this.tracks) return;
+    const r = this.sql.exec('SELECT s.rec, c.mime, c.own FROM songs s LEFT JOIN covers c ON c.id = s.id WHERE s.id = ?', id).toArray()[0];
+    const list = this.tracks.filter(t => t.id !== id);
+    this.recs.delete(id);
+    if (r) {
+      const t = this.trackRow(r), at = list.findIndex(x => x.id < id);  // 新的在前
+      if (at < 0) list.push(t); else list.splice(at, 0, t);
+    }
+    this.tracks = list;
   }
 
   // 歌手热门歌整张表（几百行）读一次记在内存里，每次打开网页、每轮定时任务都不再读库
@@ -1243,7 +1334,7 @@ export class Library extends DurableObject {
     this.sql.exec(`INSERT INTO songs (id, rec, updated) VALUES (?, ?, ?)
       ON CONFLICT(id) DO UPDATE SET rec = excluded.rec, updated = excluded.updated`,
       rec.id, JSON.stringify(rec), Date.now());
-    this.changed();
+    this.touched(rec.id);
     return !old;
   }
 
@@ -1270,7 +1361,7 @@ export class Library extends DurableObject {
     this.sql.exec('DELETE FROM covers WHERE id = ?', id);
     this.sql.exec('DELETE FROM lyrics WHERE id = ?', id);
     this.sql.exec('DELETE FROM viz WHERE id = ?', id);
-    this.changed();
+    this.touched(id);
   }
 
   // 贴网址搬运的设置：每次最多抓几首、放进哪个歌单（空 = 按类型分）。以前存的 sites、licenses 不再用
@@ -1436,7 +1527,7 @@ export class Library extends DurableObject {
   async putCover(id, mime, data, own = 1) {
     this.sql.exec(`INSERT INTO covers (id, mime, data, own) VALUES (?, ?, ?, ?)
       ON CONFLICT(id) DO UPDATE SET mime = excluded.mime, data = excluded.data, own = excluded.own`, id, mime, data, own ? 1 : 0);
-    this.changed();
+    this.touched(id);
   }
 
   async addPhoto(id, fileId) {

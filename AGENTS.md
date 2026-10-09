@@ -199,7 +199,7 @@ node test.mjs
 ```
 
 - 要 **Node 22**（CI 也用 22）。用到 `node:sqlite` 的 `DatabaseSync` 模拟 DO，用 `module.register` 加载 `test/hooks.mjs`。不用 `npm install`。
-- 通过时最后一行是 `全部 N 项通过`（写这份文件时 N = 41）。任何一项失败，脚本会抛异常、退出码非 0。
+- 通过时最后一行是 `全部 N 项通过`（写这份文件时 N = 44）。任何一项失败，脚本会抛异常、退出码非 0。
 - 测试是**一个脚本从上到下顺序跑**，各项共用同一个 `env` 和数据库，前面的状态会带到后面。加测试用 `await t('说明', async () => { … })`，放在相关的那几项附近，结束前把自己加的歌删掉（参考现有用例最后的 `admin('remove', …)`）。
 - 外部请求都由 `globalThis.fetch` 的替身处理；**没被模拟的网址会抛 `unexpected fetch`**。加了新的外部请求，就在替身里加对应分支。
 - 常用的帮手：`req(path, init)` 请求 Worker；`hook(update)` 模拟 webhook；`admin(action, payload)` 调管理接口；`dm(uid, 文字)` 模拟私聊机器人；`lastSay()` 看机器人最后发的话；`bot.*`、`mode.*` 控制模拟服务的行为。
@@ -298,7 +298,7 @@ Worker 和流式服务没法同时上线，所以改动要**两边都向后兼�
 | 账号 ID | `aca35ff5f62ae4208757219dbc3b489b` |
 | Worker 名 | `xiaoju-music`，地址 https://xiaoju-music.langhua98.workers.dev |
 | Durable Object | 绑定 `LIB`，类 `Library`（SQLite，迁移标签 `v1`），代码里用 `idFromName('library')`、`locationHint: 'apac'` |
-| KV（旧） | 绑定 `TRACKS`，id `738216f3f7d64f1ab143128406d1b35e`，只在 DO 第一次启动时迁移数据用，之后不读不写 |
+| KV | 绑定 `TRACKS`，id `738216f3f7d64f1ab143128406d1b35e`。早先只在 DO 第一次启动时迁移数据用（`t:` 开头的键）；现在存数据库挂了时的兜底快照 `snapshot:tracks`（`/api/tracks` 的内容）、`snapshot:recs`（每首的 `file_id` 等，只在服务端用）。免费版每天只能写 1000 次：**只在定时任务的整点那一轮写**（`saveSnapshot()`，一天 48 次），不要在请求里写 |
 | 普通变量 | `CHANNEL_ID=-1003817921075`；`CHANNEL_USERNAME=xiaojumusic`（频道改私密后这个用户名已经不存在，只在管理接口里原样返回，以及「搬运频道」判断是不是正式频道时用）；`STREAMER_URL=https://langhua1998-douyin-proxy.hf.space/m`（空 = 超过 20 MB 的歌不能播放，机器人搬歌功能也全关） |
 | `compatibility_date` | `2026-01-01` |
 
@@ -387,10 +387,11 @@ Worker 和流式服务没法同时上线，所以改动要**两边都向后兼�
 
 ### 6.5 Durable Object 和 Worker 的额度
 
-- DO 免费版每天最多读 500 万行。`listTracks()` 把整张歌表缓存在 DO 内存里；写了 `songs` 或 `covers` 之后**必须调 `this.changed()`** 让缓存作废。不要在每次请求、每次定时任务里 `SELECT * FROM songs` / 扫 `covers`。按图找封面走索引 `covers_data`。
+- DO 免费版每天最多读 500 万行。`listTracks()` 把整张歌表缓存在 DO 内存里；写了一首的 `songs` 或 `covers` 之后调 `this.touched(id)`（只重读这一首，一两行），批量改了才调 `this.changed()`（整表作废，下次整表重读几千行）。同步小号时一口气发几十首，每首都整表重读会用光额度。不要在每次请求、每次定时任务里 `SELECT * FROM songs` / 扫 `covers`。按图找封面走索引 `covers_data`。
 - 免费版 Worker 每次调用最多 50 个子请求，所以 `FILL_BATCH` 是 8、连着错 3 次就停。别把批量调大。
 - Worker isolate 里的缓存（`filePaths`、`recCache`、`listCache`）随时会丢，只能当加速用，不能存必须保留的东西。
 - 外部请求一律带 `AbortSignal.timeout(...)`；不用的响应体要 `res.body.cancel()`。
+- 数据库挂了的兜底：`trackList()`、`getRec()` 读 DO 出错时改用 KV 快照（`/api/tracks` 带 `X-Degraded: 1`），网页照样能听；机器人出错时 `botDown()` 回一句「多半是额度用完了」。封面、歌词、音柱不进快照。这条兜底路径别弄坏，`test.mjs` 里有专门的用例。
 
 ### 6.6 数据库结构只加不删
 
