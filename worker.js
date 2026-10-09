@@ -1195,10 +1195,13 @@ export class Library extends DurableObject {
     return { songs, pics };
   }
 
-  // 该去网易云取热门歌的歌手：还没取过的、到了该重取的。歌多的歌手先
+  // 该去网易云取热门歌的歌手：还没取过的、到了该重取的。歌多的歌手先。
+  // 只在歌表已经在内存里时才看（有人刚打开过网页、刚发过歌）：定时任务每 5 分钟来一次，DO 多半已经休眠，
+  // 为这个把整张歌表读一遍（几千行）一天就是上百万行，会把免费版每天 500 万行的读取额度用光，整个网站都读不了
   async missingHot(n, now) {
+    if (!this.tracks) return [];
     const rows = this.hotRows(), count = new Map();
-    for (const t of await this.listTracks()) for (const a of artistsOf(t.artist)) count.set(a, (count.get(a) || 0) + 1);
+    for (const t of this.tracks) for (const a of artistsOf(t.artist)) count.set(a, (count.get(a) || 0) + 1);
     return [...count].filter(([a]) => !rows.has(a) || rows.get(a).retryAt <= now)
       .sort((x, y) => y[1] - x[1]).slice(0, n).map(([a]) => a);
   }

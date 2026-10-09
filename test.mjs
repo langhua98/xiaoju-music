@@ -1278,12 +1278,15 @@ await t('歌手页按网易云热门 50 首排：后台取歌手的热门歌，/
     { id: 32, name: '星火乐队二队', hot: ['冷门歌'] });  // 名字像但不是同一位：不能算
   const runs = [];
   const tick = async () => { await worker.scheduled({ cron: '*/5 * * * *' }, env, { waitUntil: p => runs.push(p) }); await Promise.all(runs.splice(0)); };
-  for (let i = 0; i < 60 && !(await lib.listHot()).songs['星火乐队']; i++) await tick();
+  assert.deepEqual(await lib.missingHot(5, Date.now()), [], '歌表不在内存里（刚改过、DO 刚醒）：不为取热门歌去读整张歌表');
+  // 有人打开网页（歌表进了内存）之后，定时任务才顺带补
+  for (let i = 0; i < 60 && !(await lib.listHot()).songs['星火乐队']; i++) { await lib.listTracks(); await tick(); }
   const { songs: hot, pics } = await lib.listHot();
   assert.equal(pics['星火乐队'], 'https://p1.music.126.net/art31.jpg', '顺带记下歌手照片（换成 https）');
   assert.deepEqual(hot['星火乐队'], ['热门第一', '没搬的歌', '热门第二'], '后台取到了热门歌');
   assert.equal(hot['路人甲'], undefined, '网易云上没有的歌手不给');
-  for (let i = 0; i < 60 && (await lib.missingHot(5, Date.now())).length; i++) await tick();
+  for (let i = 0; i < 60 && (await lib.listTracks(), (await lib.missingHot(5, Date.now())).length); i++) await tick();
+  await lib.listTracks();
   assert.deepEqual(await lib.missingHot(5, Date.now()), [], '都取过了，一周内不再取');
   const d = await jsonOf(await req('/api/tracks'));
   assert.deepEqual(d.hot['星火乐队'], [933, 932, 931], '按热门的顺序；同一首原版在 Live 前面；冷门歌不在里面（网页排在热门后面）');
