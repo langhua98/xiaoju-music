@@ -877,7 +877,10 @@ h1{font-size:20px;margin:0;line-height:1.2}
     }
     if(g) list.appendChild(groupHead(kind, g));
     var src = fav ? favTracks() : rec ? recentTracks() : g ? g.songs : tracks;
-    if(!g && !q && src.length) list.appendChild(el('li', 'count', (rec ? '最近听过 ' : '共 ') + src.length + ' 首'));
+    if(!g && !q && src.length){
+      var nGrey = src.filter(function(t){ return t.grey; }).length;
+      list.appendChild(el('li', 'count', (rec ? '最近听过 ' : '共 ') + (src.length - nGrey) + ' 首' + (nGrey ? '（另有 ' + nGrey + ' 首灰色的暂无音源，排在最后）' : '')));
+    }
     // 歌手详情：前面是网易云热门 50 首里的（hotFirst 已经排好），分成「热门」「更多歌曲」两段，热门的带名次
     var hotN = 0;
     if(g && kind === 'artist' && !q){
@@ -927,7 +930,8 @@ h1{font-size:20px;margin:0;line-height:1.2}
     info.appendChild(el('span', 'rt', t.title));
     var ra = el('span', 'ra');
     if(t.mime === 'audio/flac') ra.appendChild(el('em', 'badge', '无损'));
-    ra.appendChild(document.createTextNode(t.playable ? [t.artist, fmt(t.duration)].filter(Boolean).join(' · ') : '暂时不能在网页播放'));
+    ra.appendChild(document.createTextNode(t.playable ? [t.artist, fmt(t.duration)].filter(Boolean).join(' · ')
+      : t.grey ? [t.artist, '暂无音源（' + t.grey + '）'].filter(Boolean).join(' · ') : '暂时不能在网页播放'));
     info.appendChild(ra);
     var eq = el('span', 'eq');
     eq.setAttribute('aria-hidden', 'true');
@@ -935,9 +939,10 @@ h1{font-size:20px;margin:0;line-height:1.2}
     b.appendChild(th); b.appendChild(info); b.appendChild(eq);
     if(!t.playable) b.disabled = true;
     b.addEventListener('click', function(){ choose(t.id); });
+    li.appendChild(b);
+    if(t.grey) return li; // 灰色歌没有音源：不给收藏
     var h = heart();
     h.addEventListener('click', function(){ toggleFav(t.id, h); });
-    li.appendChild(b);
     li.appendChild(h);
     return li;
   }
@@ -1780,7 +1785,12 @@ h1{font-size:20px;margin:0;line-height:1.2}
       if(!r.ok) throw new Error(String(r.status));
       return r.json();
     }).then(function(d){
-      tracks = d.tracks || [];
+      // 灰色歌（网易云上没有音源、只记了信息）接在最后：灰色、不能播、不能收藏。消息号用负的网易云编号，和频道的歌分开
+      var nReal = (d.tracks || []).length;
+      tracks = (d.tracks || []).concat((d.grey || []).map(function(g){
+        return { id: -Number(g.sid), title: g.title, artist: g.artist, duration: g.duration, playable: false, art: 0,
+          grey: [g.why, g.album && '《' + g.album + '》', g.year].filter(Boolean).join(' · ') };
+      }));
       playlists = d.playlists || [];
       hotIds = d.hot || {};
       artistPics = d.pics || {};
@@ -1788,7 +1798,7 @@ h1{font-size:20px;margin:0;line-height:1.2}
       byId = {};
       tracks.forEach(function(t){ byId[t.id] = t; if(t.art === 0) seen[t.id] = false; }); // 确定没专辑图的直接画文字封面
       loaded = true;
-      $('nAll').textContent = tracks.length ? String(tracks.length) : '';
+      $('nAll').textContent = nReal ? String(nReal) : '';
       // 分享链接 #消息号 优先，其次上次听的；只选中不自动出声（浏览器也不允许）
       var want = Number(location.hash.slice(1)) || prefs.last;
       var first = byId[want] && byId[want].playable ? byId[want] : playable()[0];

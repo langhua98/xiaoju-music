@@ -869,6 +869,13 @@ async def harvest_status(request: Request):
     check_key(request)
     return harvester.state if harvester else {'status': 'idle'}
 
+@app.get('/harvest/grey')
+async def harvest_grey(request: Request):
+    """灰色歌（网站上没有音源、只记了信息的）：{songs: [{sid, title, artist, album, year, duration, pop, why, page, at}]}。
+    只在内存里，Worker 每小时来取一次存进它的数据库；服务重启过就是空的"""
+    check_key(request)
+    return {'songs': list(harvester.grey.values()) if harvester else []}
+
 @app.get('/harvest/review/{sid}')
 async def harvest_sheet(sid: str, request: Request):
     """审核单的每一首（Worker 的「查看全部」网页用）。没有这张（服务重启过）→ 404"""

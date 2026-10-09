@@ -10,9 +10,10 @@ import logging
 import re
 import secrets
 import string
+import time
 
 from .sites import find_adapter, search_adapters
-from .upload import UploadError, publish
+from .upload import NoSource, UploadError, publish
 
 log = logging.getLogger('streamer.harvest')
 
@@ -26,6 +27,7 @@ def song_key(t):
 
 
 KEEP_SHEETS = 20  # 内存里最多留几张审核单（旧的丢掉）
+KEEP_GREY = 2000  # 内存里最多留几首灰色歌（Worker 每小时来取，存进它的数据库）
 ALT_MOST = 50     # 同步小号：每个号只看热门的前 50 首（网站有「热门歌」就用它，没有就按顺序取前 50 首）
 
 
@@ -41,6 +43,7 @@ class Harvester:
         self.task = None
         self.state = {'status': 'idle'}
         self.sheets = {}  # 审核单编号 → {id, site, url, tracks, status}
+        self.grey = {}    # 灰色歌（网站上没有音源的）：编号 → 信息。只在内存里，Worker 来 GET /harvest/grey 取走存着
 
     def running(self):
         return self.task is not None and not self.task.done()
@@ -285,6 +288,10 @@ class Harvester:
                 if download:
                     t = await download(t, self.http, cookie)
                 new_id = await self.publish(t, http=self.http, send=send)
+            except NoSource as e:  # 网站上就没有音源：不下载，只记信息（灰色歌）
+                row['status'], row['reason'] = 'failed', str(e)
+                await self._remember_grey(adapter, t, str(e), cookie)
+                continue
             except UploadError as e:
                 row['status'], row['reason'] = 'failed', str(e)
                 continue
@@ -298,6 +305,23 @@ class Harvester:
             if new_id:
                 st['new_ids'].append(new_id)
             await self.sleep(self.pause)  # 慢慢发，免得被限流
+
+    async def _remember_grey(self, adapter, t, why, cookie):
+        info = None
+        if hasattr(adapter, 'info'):
+            try:
+                info = await adapter.info(t, self.http, cookie)
+            except Exception:  # noqa: BLE001 — 多拿的信息，拿不到就只记歌名、歌手
+                log.exception('grey info failed')
+        info = info or {'sid': t.sid, 'title': t.title, 'artist': t.artist, 'album': '', 'year': '',
+                        'duration': round(t.duration or 0), 'pop': 0, 'why': why, 'page': t.page_url}
+        info['at'] = int(time.time())
+        key = info.get('sid') or song_key(t)
+        self.grey.pop(key, None)
+        self.grey[key] = info
+        while len(self.grey) > KEEP_GREY:
+            self.grey.pop(next(iter(self.grey)))
+        self.state['grey'] = self.state.get('grey', 0) + 1
 
     def report(self):
         st = self.state
@@ -335,4 +359,7 @@ class Harvester:
             lines += ['', '跳过的：' if crawl else '没发的：'] + [f'· {r["title"]}：{r["reason"]}' for r in other[:10]]
             if len(other) > 10:
                 lines.append(f'……还有 {len(other) - 10} 首')
+        if st.get('grey'):
+            lines += ['', f'⬜ 其中 {st["grey"]} 首网易云上没有音源（没版权、下架或要单独购买）：不下载，只记了歌名、歌手、专辑这些信息，'
+                          '网页上显示成灰色。清单 txt 一小时内发给你，发「灰色歌」马上要']
         return '\n'.join(lines)[:4000]

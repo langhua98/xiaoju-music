@@ -157,7 +157,7 @@ globalThis.fetch = async (input, init = {}) => {
     return Response.json({ code: 200, lrc: { version: 1, lyric: neteaseLyrics.get(Number(m[1])) || '' } });
   }
   // 机器人要用的流式服务接口：记下收到的请求，按 bot 里设好的回
-  if ((m = url.match(/^https:\/\/streamer\.example\/(fulfill|copy\/start|copy\/pick|auto\/start|auto\/status|search\/global|harvest|harvest\/count|harvest\/describe|harvest\/alts|harvest\/review(?:\/[a-z0-9]+)?|harvest\/status|copy\/status|netease\/login|netease\/session|netease\/check)(?:\?(.*))?$/)) || url === STREAMER + '/') {
+  if ((m = url.match(/^https:\/\/streamer\.example\/(fulfill|copy\/start|copy\/pick|auto\/start|auto\/status|search\/global|harvest|harvest\/count|harvest\/describe|harvest\/alts|harvest\/review(?:\/[a-z0-9]+)?|harvest\/status|harvest\/grey|copy\/status|netease\/login|netease\/session|netease\/check)(?:\?(.*))?$/)) || url === STREAMER + '/') {
     if (bot.streamerDown) throw new TypeError('fetch failed');
     if (url === STREAMER + '/') return Response.json({ ok: true });
     assert.equal(headers.get('X-Key'), SKEY);
@@ -173,6 +173,7 @@ globalThis.fetch = async (input, init = {}) => {
     if (m[1] === 'harvest/alts') return bot.harvestBusy ? Response.json({ detail: bot.harvestBusy }, { status: 409 }) : Response.json({ ok: true });
     if (m[1] === 'netease/session') return Response.json(bot.netease || {});
     if (m[1] === 'harvest/status') return Response.json(bot.harvestState || { status: 'idle' });
+    if (m[1] === 'harvest/grey') return Response.json({ songs: bot.grey || [] });
     if (m[1] === 'copy/status') return Response.json(bot.copyState || { logged_in: true, status: 'idle' });
     if (m[1] === 'netease/check') return Response.json(bot.check || { login: false, songs: [], channel: { ok: true, title: '小橘🍊音乐' } });
     if (m[1].startsWith('harvest/review/')) return bot.sheet ? Response.json(bot.sheet) : Response.json({ detail: 'no such sheet' }, { status: 404 });
@@ -184,6 +185,11 @@ globalThis.fetch = async (input, init = {}) => {
     return Response.json({ ok: true });
   }
   assert.ok(url.startsWith('https://api.telegram.org/'), 'unexpected fetch ' + url);
+  if (url.endsWith('/sendDocument')) {  // 发文件：multipart
+    const f = init.body;
+    bot.out.push({ method: 'sendDocument', chat_id: f.get('chat_id'), caption: f.get('caption'), name: f.get('document').name, text: await f.get('document').text() });
+    return Response.json({ ok: true, result: { message_id: 9500 } });
+  }
   if ((m = url.match(/\/bot[^/]+\/(sendMessage|answerCallbackQuery|getChatAdministrators|editMessageText|setMyCommands|editMessageReplyMarkup|deleteMessage)$/))) {
     const body = JSON.parse(init.body);
     if (m[1] === 'getChatAdministrators') {
@@ -269,7 +275,7 @@ await t('切片那一版的数据库：歌搬进 songs，状态列、chats 表�
   const old = await makeLibrary({ TRACKS: makeKV(oldTracks) }, db);
   assert.deepEqual((await old.listTracks()).map(x => x.id), [51, 7]); // 没有再从 KV 搬 4 和 12
   const tables = db.prepare("SELECT name FROM sqlite_master WHERE type = 'table' ORDER BY name").all().map(r => r.name);
-  assert.deepEqual(tables, ['artist_hot', 'asks', 'config', 'covers', 'logo_covers', 'lyrics', 'photos', 'playlists', 'songs', 'viz']);
+  assert.deepEqual(tables, ['artist_hot', 'asks', 'config', 'covers', 'grey', 'logo_covers', 'lyrics', 'photos', 'playlists', 'songs', 'viz']);
   assert.deepEqual(db.prepare('SELECT k FROM config ORDER BY k').all().map(r => r.k), ['coversV', 'migrated']);
   await makeLibrary({}, db); // 再启动一次：什么都不用做，也不报错
   assert.equal((await old.getTrack(7)).title, '旧版里的歌');
@@ -1345,6 +1351,43 @@ await t('数据库挂了（额度用完）：网页从 KV 快照照样能打开�
     env.LIB = realLib;
   }
   await admin('remove', { track: 951 });
+});
+
+await t('灰色歌：网易云上没有音源的只记信息，网页上灰色显示，清单 txt 发给频道主', async () => {
+  await hook({ channel_post: audioPost(961, { file_id: addFile(bytesOf(10, 961)), file_size: 10, title: '后来有了', performer: '孙燕姿', duration: 200 }) });
+  bot.out.length = 0;
+  await dm(OWNER, '灰色歌');
+  assert.match(lastSay().text, /还没有灰色歌/);
+  bot.grey = [
+    { sid: '11', title: '天黑黑', artist: '孙燕姿', album: 'My Story 2006', year: '2007', duration: 234, pop: 100, why: '网易云没版权', page: 'https://music.163.com/song?id=11', at: 1 },
+    { sid: '12', title: '后来有了', artist: '孙燕姿', album: '', year: '', duration: 0, pop: 50, why: '要单独购买专辑', page: '', at: 1 },
+    { sid: '13', title: '第一天', artist: '孙燕姿', album: '', year: '2004', duration: 200, pop: 80, why: '网易云没版权', page: 'javascript:alert(1)', at: 1 },
+    { sid: 'x', title: '坏数据' }, { sid: '14', title: '', artist: '甲' },
+  ];
+  // 每小时整点那一轮去流式服务取：有新的就把清单发给频道主
+  const runs = [];
+  await worker.scheduled({ cron: '*/5 * * * *', scheduledTime: Date.UTC(2026, 0, 1, 5, 0) }, env, { waitUntil: p => runs.push(p) });
+  await Promise.all(runs.splice(0));
+  const doc = bot.out.filter(o => o.method === 'sendDocument').at(-1);
+  assert.equal(String(doc.chat_id), String(OWNER));
+  assert.equal(doc.name, '小橘音乐-灰色歌.txt');
+  assert.match(doc.caption, /新记下 3 首灰色歌/);
+  assert.match(doc.text, /共 2 首，1 位歌手/, '已经搬进来的（后来有了）不算灰色');
+  assert.match(doc.text, /【孙燕姿】2 首\n  天黑黑 — 《My Story 2006》 · 2007 · 3:54 · 网易云没版权 · 热度 100\n    https:\/\/music\.163\.com\/song\?id=11\n  第一天 — 2004 · 3:20 · 网易云没版权 · 热度 80\n$/);
+  assert.doesNotMatch(doc.text, /javascript|坏数据/);
+  const d = await jsonOf(await req('/api/tracks'));
+  assert.deepEqual(d.grey.map(g => g.sid), ['11', '13']);
+  assert.deepEqual(Object.keys(d.grey[0]).sort(), ['album', 'artist', 'duration', 'sid', 'title', 'why', 'year']);
+  // 再取一次：没有新的，不再发
+  const n = bot.out.filter(o => o.method === 'sendDocument').length;
+  await worker.scheduled({ cron: '*/5 * * * *', scheduledTime: Date.UTC(2026, 0, 1, 6, 0) }, env, { waitUntil: p => runs.push(p) });
+  await Promise.all(runs.splice(0));
+  assert.equal(bot.out.filter(o => o.method === 'sendDocument').length, n);
+  // 频道主随时要
+  await dm(OWNER, '灰色歌');
+  assert.match(bot.out.at(-1).caption, /灰色歌清单/);
+  bot.grey = [];
+  await admin('remove', { track: 961 });
 });
 
 await t('路由：404、405、CORS 预检', async () => {
