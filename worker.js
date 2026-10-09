@@ -1546,6 +1546,7 @@ const HELP = `我是小橘音乐的管理助手 🍊 常用的点下面的按钮
 搬 @频道名 100 —— 从这个频道搬 100 首中文歌（查重），搬完告诉你
 找 歌名 —— 在小橘音乐里找这首，可以加进/移出歌单、删除
 统计 —— 歌库和这几天搬歌的情况
+进度 —— 正在搬的活做到哪了（同步小号、往频道发歌、抓网址、从频道搬歌）
 贴网易云主页链接（歌手主页、音乐人的用户主页） —— 记成小号：它热门前 50 首里库里没有的，不用你过目，直接发进频道（和小橘视频的小号一样）
 小号 —— 看加了哪些小号；「同步小号」现在把所有小号抓一遍；「删除小号 2」删第 2 个；每天凌晨 3 点自动同步
 贴专辑、歌单、单曲链接 —— 抓里面的歌，先列给你过目，确认是我们的歌点通过才发进频道；专辑、歌单会先告诉你一共几首、已有几首，点按钮选抓多少；后面直接加数量就不问了，比如「网址 30」
@@ -1564,23 +1565,24 @@ const PUBLIC_HELP = `你好，这里是小橘音乐 🍊
 const tooLong = s => s.length > 60;
 // 频道主的菜单：输入框下面常驻的按钮（点了等于发对应的文字），和左下角「菜单」里的 / 命令
 const OWNER_KEYBOARD = {
-  keyboard: [['📈 统计', '🎵 搬运设置'], ['👥 小号', '❓ 帮助']],
+  keyboard: [['📈 统计', '⏳ 进度'], ['🎵 搬运设置', '👥 小号'], ['❓ 帮助']],
   resize_keyboard: true, is_persistent: true,
 };
 
 const OWNER_COMMANDS = [
   ['stats', '📈 歌库和搬歌统计'],
+  ['tasks', '⏳ 正在搬的进度'],
   ['harvest', '🎵 搬运设置'],
   ['alts', '👥 小号'],
   ['help', '❓ 全部功能'],
 ];
 
 const OWNER_ALIAS = {
-  '📈 统计': '统计', '🎵 搬运设置': '搬运设置', '👥 小号': '小号', '❓ 帮助': '帮助',
-  '/stats': '统计', '/harvest': '搬运设置', '/alts': '小号',
+  '📈 统计': '统计', '⏳ 进度': '进度', '🎵 搬运设置': '搬运设置', '👥 小号': '小号', '❓ 帮助': '帮助',
+  '/stats': '统计', '/tasks': '进度', '/harvest': '搬运设置', '/alts': '小号',
 };
 
-const COMMANDS_VERSION = '4';
+const COMMANDS_VERSION = '5';
 
 
 // 频道主的「菜单」命令只设给频道主自己看（听众那边不变）；版本变了才重设
@@ -1616,6 +1618,7 @@ async function botUpdate(env, update, origin) {
     if ((c = /^搬\s*@?(\w{4,64})(?:\s+(\d{1,4}))?\s*(?:首)?$/.exec(t))) return ownerCopy(env, chat, c[1], Number(c[2] || 50));
     if ((c = /^找\s*(.+)$/.exec(t))) return ownerFind(env, chat, c[1].trim(), origin);
     if (/^(统计|今天搬了多少|搬了多少)/.test(t)) return ownerStats(env, chat);
+    if (/^(进度|搬到哪了|同步进度)$/.test(t)) return ownerProgress(env, chat);
     if ((c = /^爬\s*(.*?)(?:\s+(\d{1,3})\s*首?)?$/.exec(t))) {
       if (!c[1]) return say(env, chat, '爬什么？发「爬 歌名或歌手」，比如「爬 小橘 30」');
       return ownerHarvest(env, chat, { query: c[1].slice(0, 60) }, c[2] ? Number(c[2]) : 0, origin);
@@ -1762,6 +1765,51 @@ async function ownerStats(env, chat) {
   if (auto.lastStart) lines.push(`上次夜里自动搬：${auto.lastStart.slice(0, 10)}${auto.lastCopied != null ? `，搬了 ${auto.lastCopied} 首` : ''}`);
   lines.push('', '各歌单：', ...(await L.listPlaylists()).map(p => `· ${p.name} ${p.tracks.length} 首`));
   return say(env, chat, lines.join('\n'));
+}
+
+// 「进度」：问流式服务正在搬的活做到哪了（贴网址抓歌 / 发审核通过的 / 同步小号，和从频道搬歌各一单）。
+// 这两个状态只在流式服务的内存里，它重启过就是「没在搬」
+async function ownerProgress(env, chat) {
+  if (!streamerOn(env)) return say(env, chat, '搬运服务没配置');
+  let h, c;
+  try {
+    [h, c] = await Promise.all([streamerCall(env, '/harvest/status'), streamerCall(env, '/copy/status')]);
+  } catch {
+    return say(env, chat, '搬运服务正在唤醒，过一两分钟再发「进度」');
+  }
+  if (h.status !== 200 && c.status !== 200) return say(env, chat, '搬运服务正在唤醒，过一两分钟再发「进度」');
+  const lines = [harvestProgress(h.status === 200 ? h.data : null), copyProgress(c.status === 200 ? c.data : null)].filter(Boolean);
+  return say(env, chat, lines.length ? lines.join('\n\n') : '现在没有在搬的活。（搬运服务重启过的话，之前那单的记录也没了）');
+}
+
+// 流式服务 Harvester 的状态 → 一段话。kind：direct 同步小号 / post 发审核通过的 / crawl 抓网址、爬关键词
+function harvestProgress(h) {
+  if (!h || !h.kind || h.status === 'idle') return '';
+  const n = (h.results || []).length;
+  const alts = (h.alts || []).filter(Boolean);
+  const what = h.kind === 'direct' ? `同步小号${alts.length ? `「${alts.join('、')}」` : ''}`
+    : h.kind === 'post' ? '把审核通过的歌发进频道'
+    : h.query ? `在${h.site || '网站'}搜「${h.query}」` : `抓网址里的歌（${h.site || ''}）`;
+  const posting = h.kind === 'direct' || h.kind === 'post';
+  const have = h.have ? `；${h.have} 首库里已有，不发` : '';
+  if (h.status === 'running') {
+    if (h.kind === 'direct' && !h.total) return `🔄 正在${what}：在看热门前 50 首，找库里没有的${have}`;
+    if (posting) return `🔄 正在${what}：${h.total} 首新歌，已发 ${h.copied} 首，处理到第 ${n} 首${have}`;
+    return `🔄 正在${what}：已经看了 ${n} 首，抓完发审核单给你`;
+  }
+  const end = h.status === 'error' ? `出错停了（${h.error || '原因不明'}）` : h.status === 'stopped' ? '被停掉了' : '已经做完';
+  const tail = posting ? `，发了 ${h.copied || 0} 首${h.total > h.copied ? `，没发 ${h.total - h.copied} 首` : ''}${have}`
+    : h.kind === 'crawl' && h.review ? `，${h.review} 首进了审核单` : '';
+  return `✅ 上一单（${what}）${end}${tail}`;
+}
+
+// 流式服务 Copier 的状态（从来源频道搬歌、夜里自动搬）→ 一段话；没在跑就不说
+function copyProgress(c) {
+  if (!c || c.status !== 'running') return '';
+  const what = c.mode === 'auto' ? '夜里自动搬' : `从 @${c.source || '来源频道'} 搬歌`;
+  const skipped = (c.skipped_dup || 0) + (c.skipped_lang || 0) + (c.skipped_other || 0);
+  return `🔄 正在${what}：看了 ${c.scanned || 0} 首，搬了 ${c.copied || 0} 首` + (skipped ? `，跳过 ${skipped} 首` : '') +
+    (c.waiting ? `（Telegram 限流，等 ${c.waiting} 秒）` : '');
 }
 
 async function botButton(env, cb, owner, origin) {
@@ -1993,7 +2041,7 @@ async function syncAlts(env, chat, alts) {
   await altHot(env, alts);
   const names = alts.map(a => a.name || a.id).join('、');
   if (r.status === 200) {
-    return say(env, chat, `开始同步小号「${names}」：每个号看热门前 50 首，库里没有的直接发进${h.channel ? `测试频道 @${h.channel}` : '频道'}，不用审核，发完告诉你。`);
+    return say(env, chat, `开始同步小号「${names}」：每个号看热门前 50 首，库里没有的直接发进${h.channel ? `测试频道 @${h.channel}` : '频道'}，不用审核，发完告诉你。中途想看做到哪了，发「进度」。`);
   }
   if (r.status === 409 && r.data.detail && r.data.detail.busy) {
     return say(env, chat, `上一单还没做完：${r.data.detail.busy}。做完会通知你，到时发「同步小号」。`);

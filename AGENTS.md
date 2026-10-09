@@ -113,7 +113,7 @@
 | 音频流 | `audio()`、`parseRange()`、`fromBotApi()`、`fromStreamer()`、`passthrough()`、`fetchFile()`、`filePath()` | iOS Safari 必须有 206；流式服务没醒回 503 + `Retry-After` |
 | 数据库 | `class Library` | 建表、一次性迁移都在构造函数里；方法都是 RPC，参数和返回值会被结构化克隆 |
 | 整理歌名 | `summary()` | 去掉表演者里的 `@频道`、「更多音乐」；没有歌手时拆「歌手 - 歌名」（**和流式服务的 `clean_names()` 必须一致**） |
-| 机器人 | `tg()`、`say()`、`ownerId()`、`streamerCall()`、`HELP`、`OWNER_*`、`COMMANDS_VERSION`、`botUpdate()`、`songRequest()`、`owner*()`、`botButton()` | 频道主 = 频道创建者（`getChatAdministrators` 查一次，记在 `ownerId`） |
+| 机器人 | `tg()`、`say()`、`ownerId()`、`streamerCall()`、`HELP`、`OWNER_*`、`COMMANDS_VERSION`、`botUpdate()`、`songRequest()`、`owner*()`（`ownerProgress()` 把流式服务的 `/harvest/status`、`/copy/status` 翻成人话）、`botButton()` | 频道主 = 频道创建者（`getChatAdministrators` 查一次，记在 `ownerId`） |
 | 贴网址搬运 | `HARVEST_SITES`、`harvestPanel()`、`showHarvest()`、`setHarvest*()`、`neteaseLogin()`、`neteaseAccount()`、`ownerHarvest()`、`ownerLink()`、`harvestCount()`、`harvestDecide()`、`harvestReviewPage()` | 真正干活的在流式服务的 `harvest/` |
 | 小号 | `getAlts()`、`altsText()`、`deleteAlt()`、`syncAlts()` | 网易云主页热门前 50 首，库里没有的不审核直接发 |
 | 夜里自动搬 | `nightly()` | 先叫醒流式服务（最多试 10 次、每次间隔 20 秒），同步小号，再 `/auto/start` |
