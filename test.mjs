@@ -1218,6 +1218,22 @@ await t('频道主的菜单：常驻按钮和 / 命令（只设给频道主）�
   assert.doesNotMatch(help.text, /运行爬虫|搜抖音|审核/);
   assert.deepEqual(help.reply_markup.keyboard[0], ['📈 统计', '⏳ 进度']);
   assert.ok(set.commands.some(c => c.command === 'tasks'));
+  // 版本变了：重设菜单，再发一句带新按钮的话（常驻按钮要随消息发过去才会换）
+  const news = bot.out.filter(o => o.method === 'sendMessage' && /按钮更新了/.test(o.text)).at(-1);
+  assert.equal(news.chat_id, OWNER);
+  assert.deepEqual(news.reply_markup.keyboard.flat(),
+    ['📈 统计', '⏳ 进度', '👥 小号', '🔄 同步小号', '⬜ 灰色歌', '🩺 自检', '🔑 网易云登录', '🎵 搬运设置', '❓ 帮助']);
+  assert.deepEqual(set.commands.map(c => c.command), ['stats', 'tasks', 'alts', 'sync', 'grey', 'check', 'login', 'harvest', 'help']);
+  assert.ok(set.commands.every(c => c.command.length <= 32 && c.description.length <= 256), 'Telegram 的长度限制');
+  // 每个按钮、每个 / 命令都对得上一个真的命令（不会落到「找歌」去）
+  for (const [b, cmd] of [['🔄 同步小号', '/sync'], ['⬜ 灰色歌', '/grey'], ['🩺 自检', '/check'], ['🔑 网易云登录', '/login']]) {
+    for (const x of [b, cmd]) {
+      const before = bot.toStreamer.length + bot.out.length;
+      await dm(OWNER, x);
+      assert.ok(bot.toStreamer.length + bot.out.length > before, x + ' 有回应');
+      assert.doesNotMatch(lastSay() ? lastSay().text : '', /没找到|找不到「/, x + ' 不是当成歌名去找');
+    }
+  }
   const n = bot.out.filter(o => o.method === 'setMyCommands').length;
   await dm(OWNER, '❓ 帮助');
   assert.equal(bot.out.filter(o => o.method === 'setMyCommands').length, n, '设过一次就不再设');

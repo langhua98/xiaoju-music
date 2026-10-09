@@ -1800,24 +1800,32 @@ const PUBLIC_HELP = `你好，这里是小橘音乐 🍊
 const tooLong = s => s.length > 60;
 // 频道主的菜单：输入框下面常驻的按钮（点了等于发对应的文字），和左下角「菜单」里的 / 命令
 const OWNER_KEYBOARD = {
-  keyboard: [['📈 统计', '⏳ 进度'], ['🎵 搬运设置', '👥 小号'], ['❓ 帮助']],
+  keyboard: [['📈 统计', '⏳ 进度'], ['👥 小号', '🔄 同步小号'], ['⬜ 灰色歌', '🩺 自检'], ['🔑 网易云登录', '🎵 搬运设置'], ['❓ 帮助']],
   resize_keyboard: true, is_persistent: true,
 };
 
 const OWNER_COMMANDS = [
   ['stats', '📈 歌库和搬歌统计'],
   ['tasks', '⏳ 正在搬的进度'],
+  ['alts', '👥 小号列表'],
+  ['sync', '🔄 同步小号（新歌直接发）'],
+  ['grey', '⬜ 灰色歌清单（没有音源的）'],
+  ['check', '🩺 自检（网易云登录、下载、发帖）'],
+  ['login', '🔑 网易云登录（扫码）'],
   ['harvest', '🎵 搬运设置'],
-  ['alts', '👥 小号'],
   ['help', '❓ 全部功能'],
 ];
 
 const OWNER_ALIAS = {
-  '📈 统计': '统计', '⏳ 进度': '进度', '🎵 搬运设置': '搬运设置', '👥 小号': '小号', '❓ 帮助': '帮助',
-  '/stats': '统计', '/tasks': '进度', '/harvest': '搬运设置', '/alts': '小号',
+  '📈 统计': '统计', '⏳ 进度': '进度', '👥 小号': '小号', '🔄 同步小号': '同步小号', '⬜ 灰色歌': '灰色歌',
+  '🩺 自检': '自检', '🔑 网易云登录': '网易云登录', '🎵 搬运设置': '搬运设置', '❓ 帮助': '帮助',
+  '/stats': '统计', '/tasks': '进度', '/alts': '小号', '/sync': '同步小号', '/grey': '灰色歌',
+  '/check': '自检', '/login': '网易云登录', '/harvest': '搬运设置',
 };
 
-const COMMANDS_VERSION = '5';
+const COMMANDS_VERSION = '6';
+// 按钮变了，菜单（/ 命令）自动重设；输入框下面的常驻按钮要随一条消息发过去才会换，所以顺带说一句
+const COMMANDS_NEWS = '按钮更新了：多了「🔄 同步小号」「⬜ 灰色歌」「🩺 自检」「🔑 网易云登录」，点一下就行，不用打字。';
 
 
 // 频道主的「菜单」命令只设给频道主自己看（听众那边不变）；版本变了才重设
@@ -1828,7 +1836,9 @@ async function ensureOwnerCommands(env, owner) {
     commands: OWNER_COMMANDS.map(([command, description]) => ({ command, description })),
     scope: { type: 'chat', chat_id: owner },
   });
-  if (r.ok) await L.setConfig('cmdsVer', COMMANDS_VERSION);
+  if (!r.ok) return;
+  await L.setConfig('cmdsVer', COMMANDS_VERSION);
+  await tg(env, 'sendMessage', { chat_id: owner, text: COMMANDS_NEWS, reply_markup: OWNER_KEYBOARD });
 }
 
 function ownerHelp(env, chat) {
