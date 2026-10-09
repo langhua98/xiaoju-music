@@ -135,11 +135,19 @@ export default {
       if (e instanceof HttpError) return text(e.message, e.status, e.headers);
       // 真正的原因打进 Worker 日志（wrangler tail / 控制台能看），比如免费版 Durable Object 额度用完
       console.log('error', method, path, String((e && e.stack) || e));
-      return text('服务器出错了，请稍后再试', 500);
+      return text('服务器出错了，请稍后再试' + dbWhy(e), 500);
     }
   },
 };
 
+
+// 数据库（Durable Object）报的错：把说明原文带在 500 里（只是错误说明，没有密钥）。这个 Worker 没开日志保存，
+// 线上出事时不用等 wrangler tail 也能一眼看出原因，比如「Exceeded allowed rows read」就是免费额度用完了
+function dbWhy(e) {
+  const msg = String((e && e.message) || '');
+  if (!(e && e.remote) && !/durable object|sqlite|exceeded|storage/i.test(msg)) return '';
+  return '（数据库：' + msg.replace(/\s+/g, ' ').slice(0, 200) + '）';
+}
 
 function lib(env) {
   return env.LIB.get(env.LIB.idFromName('library'), { locationHint: 'apac' });
