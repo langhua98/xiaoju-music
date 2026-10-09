@@ -41,6 +41,7 @@ function makeKV(records) {
   const m = new Map(records.map(r => ['t:' + r.id, JSON.stringify(r)]));
   return {
     async get(k, type) { const v = m.get(k); return v == null ? null : type === 'json' ? JSON.parse(v) : v; },
+    async put(k, v) { m.set(k, String(v)); },
     async list({ prefix, cursor }) {
       const keys = [...m.keys()].filter(k => k.startsWith(prefix)).sort();
       const start = cursor ? Number(cursor) : 0;
@@ -1278,7 +1279,8 @@ await t('歌手页按网易云热门 50 首排：后台取歌手的热门歌，/
     { id: 32, name: '星火乐队二队', hot: ['冷门歌'] });  // 名字像但不是同一位：不能算
   const runs = [];
   const tick = async () => { await worker.scheduled({ cron: '*/5 * * * *' }, env, { waitUntil: p => runs.push(p) }); await Promise.all(runs.splice(0)); };
-  assert.deepEqual(await lib.missingHot(5, Date.now()), [], '歌表不在内存里（刚改过、DO 刚醒）：不为取热门歌去读整张歌表');
+  lib.changed();  // 像 DO 刚醒：歌表不在内存里
+  assert.deepEqual(await lib.missingHot(5, Date.now()), [], '歌表不在内存里（DO 刚醒）：不为取热门歌去读整张歌表');
   // 有人打开网页（歌表进了内存）之后，定时任务才顺带补
   for (let i = 0; i < 60 && !(await lib.listHot()).songs['星火乐队']; i++) { await lib.listTracks(); await tick(); }
   const { songs: hot, pics } = await lib.listHot();
@@ -1296,6 +1298,53 @@ await t('歌手页按网易云热门 50 首排：后台取歌手的热门歌，/
   await lib.putHot('星火乐队', ['热门第一'], Date.now() + DAY, '');
   assert.equal((await lib.listHot()).pics['星火乐队'], 'https://p1.music.126.net/art31.jpg');
   for (const id of [931, 932, 933, 934]) await admin('remove', { track: id });
+});
+
+await t('发歌、删歌、配封面只重读那一首：内存里的歌表和整表重读一模一样', async () => {
+  await lib.listTracks();  // 有人打开过网页：歌表在内存里
+  await hook({ channel_post: audioPost(941, { file_id: addFile(bytesOf(10, 941)), file_size: 10, title: '中间插进来', performer: '甲', duration: 100 }) });
+  await hook({ channel_post: audioPost(942, { file_id: addFile(bytesOf(10, 942)), file_size: 10, title: '最新的', performer: '乙', duration: 100 }) });
+  await lib.putCover(941, 'image/jpeg', 'QUJD', 1);
+  await admin('remove', { track: 942 });
+  const patched = JSON.stringify(await lib.listTracks());
+  lib.changed();
+  assert.equal(patched, JSON.stringify(await lib.listTracks()), '顺序、封面标记都和重读的一样');
+  assert.ok((await lib.listTracks()).some(x => x.id === 941 && x.art === 1));
+  await admin('remove', { track: 941 });
+});
+
+await t('数据库挂了（额度用完）：网页从 KV 快照照样能打开、能听；机器人说一声，不再不吭声', async () => {
+  await hook({ channel_post: audioPost(951, { file_id: addFile(bytesOf(30, 951)), file_size: 30, title: '挂了也能听', performer: '小橘', duration: 100 }) });
+  const runs = [];
+  const tick = async at => { await worker.scheduled({ cron: '*/5 * * * *', scheduledTime: at }, env, { waitUntil: p => runs.push(p) }); await Promise.all(runs.splice(0)); };
+  await tick(Date.UTC(2026, 0, 1, 3, 25));
+  assert.ok(!String(await env.TRACKS.get('snapshot:tracks')).includes('挂了也能听'), '不是整点那一轮：不写 KV（免费版每天只能写 1000 次）');
+  await tick(Date.UTC(2026, 0, 1, 4, 0));
+  const snap = JSON.parse(await env.TRACKS.get('snapshot:tracks'));
+  assert.ok(snap.tracks.some(x => x.id === 951) && !JSON.stringify(snap.tracks).includes('file_id'), '快照里的歌单和 /api/tracks 一样，不带 file_id');
+  assert.equal((await env.TRACKS.get('snapshot:recs', 'json'))[951].size, 30);
+  await admin('remove', { track: 999999 });  // 让 isolate 里的歌单缓存作废
+  const realLib = env.LIB;
+  env.LIB = { idFromName: n => n, get: () => new Proxy({}, { get: () => async () => { throw new Error('Exceeded allowed rows read in Durable Objects free tier.'); } }) };
+  try {
+    const r = await req('/api/tracks');
+    assert.equal(r.status, 200);
+    assert.equal(r.headers.get('X-Degraded'), '1');
+    assert.ok((await jsonOf(r)).tracks.some(x => x.id === 951));
+    const a = await req('/a/951', { headers: { Range: 'bytes=0-9' } });
+    assert.equal(a.status, 206, '用快照里的文件信息照样放');
+    assert.equal((await a.arrayBuffer()).byteLength, 10);
+    assert.equal((await req('/c/951')).status, 500, '封面不进快照：网页画文字封面');
+    bot.out.length = 0;
+    await dm(FAN, '晴天');
+    assert.match(lastSay().text, /数据库今天的免费额度用完了/);
+    await press(OWNER, 'a:951');
+    assert.ok(bot.out.some(o => o.method === 'answerCallbackQuery'), '按钮也回一声，不转圈');
+    assert.match(lastSay().text, /网页还能听歌/);
+  } finally {
+    env.LIB = realLib;
+  }
+  await admin('remove', { track: 951 });
 });
 
 await t('路由：404、405、CORS 预检', async () => {

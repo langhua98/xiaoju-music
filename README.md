@@ -74,6 +74,11 @@ Worker 先回 `503` + `Retry-After`，播放页提示「正在唤醒」并每 10
 
 **搬来的歌**：帖子说明里有「来源：https://music.163.com/song?id=…」的，直接按这个编号取网易云的歌词，不用模糊搜。
 
+**数据库挂了**（多半是 Durable Object 免费版每天 500 万行的读取额度用完了，北京时间早上 8 点重置）：定时任务每小时整点那一轮把歌单和每首歌的文件信息
+存一份到 KV（`snapshot:tracks`、`snapshot:recs`，一天写 48 次，KV 免费版每天能写 1000 次）。数据库读不了时，`/api/tracks` 和播放 `/a/` 改用快照
+（响应头 `X-Degraded: 1`），网页照样能打开、能听；封面画文字封面、没有歌词；新发的歌要等数据库恢复才进来（Telegram 会重发）。
+机器人这时回一句「出错了，多半是数据库今天的免费额度用完了……」，不再一声不吭。
+
 **后台补全**：Worker 的定时任务每 5 分钟一次（`*/5 * * * *`，`fillMissing`）按消息号顺序看接下来 8 首，还没有封面的、还没找过歌词（或到了再找时间）的，
 先找好存起来，打开时直接就有；连着出错 3 次就停，下一轮接着来。这一轮没有封面、歌词要补时，再取 1 位歌手在网易云的「热门 50 首」
 （歌多的歌手先；只在歌表已经在内存里时才取，不为它读整张歌表；一周重取一次，网易云上找不到的一个月后再试），网页的歌手页按它排：热门歌按网易云的顺序排最前面，其余新的在前。
@@ -92,7 +97,7 @@ UTF-8、GBK、UTF-16 编码都认；配上之后可以把频道里的这条 `.lr
 | Worker 名 | `xiaoju-music` |
 | 账号 ID | `aca35ff5f62ae4208757219dbc3b489b` |
 | Durable Object | 绑定名 `LIB`，类 `Library`（SQLite，迁移标签 `v1`），位置提示 `apac` |
-| KV（旧） | `xiaoju-music-tracks`，id=`738216f3f7d64f1ab143128406d1b35e`，绑定名 `TRACKS`，只用于迁移 |
+| KV | `xiaoju-music-tracks`，id=`738216f3f7d64f1ab143128406d1b35e`，绑定名 `TRACKS`：早先用于迁移；现在每小时存一份兜底快照（见下面「数据库挂了」） |
 | Secret | `TG_BOT_TOKEN`、`TG_WEBHOOK_SECRET`、`ADMIN_KEY`、`STREAMER_KEY` |
 | 普通变量 | `CHANNEL_ID=-1003817921075`、`CHANNEL_USERNAME=xiaojumusic`（频道改私密后这个用户名已经不存在，只剩管理接口原样返回它）、`STREAMER_URL`（流式服务地址，空＝大文件不能播放） |
 | Telegram webhook | `…/tg-webhook`，`allowed_updates=["channel_post","edited_channel_post"]` |
