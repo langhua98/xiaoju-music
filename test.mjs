@@ -188,9 +188,15 @@ globalThis.fetch = async (input, init = {}) => {
   if (url.endsWith('/sendDocument')) {  // 发文件：multipart
     const f = init.body;
     bot.out.push({ method: 'sendDocument', chat_id: f.get('chat_id'), caption: f.get('caption'), name: f.get('document').name, text: await f.get('document').text() });
-    return Response.json({ ok: true, result: { message_id: 9500 } });
+    return Response.json({ ok: true, result: { message_id: 9500 + bot.out.length } });
   }
-  if ((m = url.match(/\/bot[^/]+\/(sendMessage|answerCallbackQuery|getChatAdministrators|editMessageText|setMyCommands|editMessageReplyMarkup|deleteMessage)$/))) {
+  if (url.endsWith('/editMessageMedia')) {  // 替换消息里的文件：multipart，media 是 JSON，文件在 attach:// 指的字段里
+    const f = init.body, media = JSON.parse(f.get('media')), doc = f.get(media.media.replace('attach://', ''));
+    if (bot.deletedMsgs && bot.deletedMsgs.includes(Number(f.get('message_id')))) return Response.json({ ok: false, description: 'Bad Request: message to edit not found' });
+    bot.out.push({ method: 'editMessageMedia', chat_id: f.get('chat_id'), message_id: Number(f.get('message_id')), caption: media.caption, name: doc.name, text: await doc.text() });
+    return Response.json({ ok: true, result: {} });
+  }
+  if ((m = url.match(/\/bot[^/]+\/(sendMessage|answerCallbackQuery|getChatAdministrators|editMessageText|setMyCommands|editMessageReplyMarkup|deleteMessage|pinChatMessage)$/))) {
     const body = JSON.parse(init.body);
     if (m[1] === 'getChatAdministrators') {
       assert.equal(String(body.chat_id), String(CHANNEL));
@@ -1371,21 +1377,45 @@ await t('灰色歌：网易云上没有音源的只记信息，网页上灰色�
   const doc = bot.out.filter(o => o.method === 'sendDocument').at(-1);
   assert.equal(String(doc.chat_id), String(OWNER));
   assert.equal(doc.name, '小橘音乐-灰色歌.txt');
-  assert.match(doc.caption, /新记下 3 首灰色歌/);
+  assert.match(doc.caption, /共 2 首，1 位歌手，.* 更新，新增 3 首/);
   assert.match(doc.text, /共 2 首，1 位歌手/, '已经搬进来的（后来有了）不算灰色');
   assert.match(doc.text, /【孙燕姿】2 首\n  天黑黑 — 《My Story 2006》 · 2007 · 3:54 · 网易云没版权 · 热度 100\n    https:\/\/music\.163\.com\/song\?id=11\n  第一天 — 2004 · 3:20 · 网易云没版权 · 热度 80\n$/);
   assert.doesNotMatch(doc.text, /javascript|坏数据/);
+  const pin = bot.out.find(o => o.method === 'pinChatMessage');
+  const fileMsg = JSON.parse(await lib.getConfig('greyMsg')).id;
+  assert.equal(pin.message_id, fileMsg, '清单置顶');
   const d = await jsonOf(await req('/api/tracks'));
-  assert.deepEqual(d.grey.map(g => g.sid), ['11', '13']);
+  assert.deepEqual(d.grey.map(g => g.sid).sort(), ['11', '13']);
   assert.deepEqual(Object.keys(d.grey[0]).sort(), ['album', 'artist', 'duration', 'sid', 'title', 'why', 'year']);
-  // 再取一次：没有新的，不再发
-  const n = bot.out.filter(o => o.method === 'sendDocument').length;
-  await worker.scheduled({ cron: '*/5 * * * *', scheduledTime: Date.UTC(2026, 0, 1, 6, 0) }, env, { waitUntil: p => runs.push(p) });
-  await Promise.all(runs.splice(0));
-  assert.equal(bot.out.filter(o => o.method === 'sendDocument').length, n);
-  // 频道主随时要
+  const tick = async h => { await worker.scheduled({ cron: '*/5 * * * *', scheduledTime: Date.UTC(2026, 0, 1, h, 0) }, env, { waitUntil: p => runs.push(p) }); await Promise.all(runs.splice(0)); };
+  // 再取一次：没有新的，什么也不发
+  const n = bot.out.length;
+  await tick(6);
+  assert.equal(bot.out.length, n);
+  // 有新的：替换置顶那条里的文件（不发新文件），另发一句短提示
+  bot.grey.push({ sid: '15', title: '遇见', artist: '孙燕姿', why: '网易云没版权', pop: 99 });
+  await tick(7);
+  assert.equal(bot.out.filter(o => o.method === 'sendDocument').length, 1, '只有一个文件');
+  const edit = bot.out.filter(o => o.method === 'editMessageMedia').at(-1);
+  assert.equal(edit.message_id, fileMsg);
+  assert.match(edit.caption, /共 3 首，1 位歌手，.*新增 1 首/);
+  assert.match(edit.text, /遇见/);
+  assert.match(lastSay().text, /灰色歌清单更新了：新增 1 首，现在共 3 首/);
+  assert.equal(lastSay().reply_parameters.message_id, fileMsg, '点提示就跳到那个文件');
+  // 频道主自己要：也是更新那一个，告诉他在置顶
   await dm(OWNER, '灰色歌');
-  assert.match(bot.out.at(-1).caption, /灰色歌清单/);
+  assert.equal(bot.out.filter(o => o.method === 'sendDocument').length, 1);
+  assert.match(lastSay().text, /就是置顶的那个文件/);
+  // 那条被删了：重发一条、重新置顶
+  bot.deletedMsgs = [fileMsg];
+  bot.grey.push({ sid: '16', title: '开始懂了', artist: '孙燕姿', why: '要单独购买专辑' });
+  await tick(8);
+  const again = bot.out.filter(o => o.method === 'sendDocument');
+  assert.equal(again.length, 2);
+  assert.match(again.at(-1).text, /开始懂了/);
+  assert.notEqual(JSON.parse(await lib.getConfig('greyMsg')).id, fileMsg);
+  assert.equal(bot.out.filter(o => o.method === 'pinChatMessage').length, 2);
+  bot.deletedMsgs = null;
   bot.grey = [];
   await admin('remove', { track: 961 });
 });

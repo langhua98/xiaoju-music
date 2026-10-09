@@ -414,7 +414,7 @@ async function pullGrey(env) {
   if (fresh) {
     listCache = null;
     const owner = await ownerId(env);
-    if (owner) await sendGreyFile(env, owner, `⬜ 新记下 ${fresh} 首灰色歌（网易云上没有音源），这是完整清单`);
+    if (owner) await sendGreyFile(env, owner, fresh);
   }
   return fresh;
 }
@@ -448,15 +448,51 @@ function greyText(grey) {
   return lines.join('\n');
 }
 
-async function sendGreyFile(env, chat, caption) {
-  const tracks = await lib(env).listTracks();
-  const grey = stillGrey(await lib(env).listGrey(), tracks);
+// 清单只有一份：第一次发成文件、置顶，记下是哪条（config 的 greyMsg）；以后有新的就替换那条消息里的文件，聊天里不会一堆同名文件。
+// 替换文件不响通知，所以有新增时另发一句短提示。那条被删了（替换失败）就重发一条再置顶。
+// fresh：这次新增几首（0 = 没有新增，比如频道主自己要）；asked：频道主发「灰色歌」要的，回一句清单在哪
+async function sendGreyFile(env, chat, fresh, asked) {
+  const L = lib(env);
+  const grey = stillGrey(await L.listGrey(), await L.listTracks());
   if (!grey.length) return say(env, chat, '还没有灰色歌：同步小号、发审核通过的歌时，网易云上没有音源的会记在这里。');
-  const form = new FormData();
-  form.append('chat_id', String(chat));
-  form.append('caption', caption);
-  form.append('document', new Blob([greyText(grey)], { type: 'text/plain;charset=utf-8' }), '小橘音乐-灰色歌.txt');
-  const res = await fetch(`${TG}/bot${env.TG_BOT_TOKEN}/sendDocument`, { method: 'POST', body: form });
+  const artists = new Set(grey.map(g => g.artist)).size;
+  const day = new Date(Date.now() + 8 * 3600e3).toISOString().slice(5, 16).replace('T', ' ');
+  const caption = `⬜ 灰色歌清单（网易云上没有音源，只记了信息）：共 ${grey.length} 首，${artists} 位歌手，${day} 更新` + (fresh ? `，新增 ${fresh} 首` : '');
+  const file = () => new Blob([greyText(grey)], { type: 'text/plain;charset=utf-8' });
+  const saved = JSON.parse((await L.getConfig('greyMsg')) || '{}');
+  let msgId = 0;
+  if (saved.id && String(saved.chat) === String(chat)) {
+    const form = new FormData();
+    form.append('chat_id', String(chat));
+    form.append('message_id', String(saved.id));
+    form.append('media', JSON.stringify({ type: 'document', media: 'attach://list', caption }));
+    form.append('list', file(), GREY_FILE);
+    const r = await tgForm(env, 'editMessageMedia', form);
+    if (r.ok || /not modified/i.test(r.description || '')) msgId = saved.id;
+  }
+  if (!msgId) {  // 第一次，或者原来那条被删了：重发一条，置顶
+    const form = new FormData();
+    form.append('chat_id', String(chat));
+    form.append('caption', caption);
+    form.append('document', file(), GREY_FILE);
+    const r = await tgForm(env, 'sendDocument', form);
+    msgId = r.ok && r.result && r.result.message_id;
+    if (!msgId) return say(env, chat, '灰色歌清单发不出去，过一会儿发「灰色歌」再试');
+    await L.setConfig('greyMsg', JSON.stringify({ chat: String(chat), id: msgId }));
+    await tg(env, 'pinChatMessage', { chat_id: chat, message_id: msgId, disable_notification: true });
+    return null;  // 新文件本身会响通知，不用再说
+  }
+  if (fresh || asked) {
+    const note = fresh ? `⬜ 灰色歌清单更新了：新增 ${fresh} 首，现在共 ${grey.length} 首。就是置顶的那个文件` : `⬜ 灰色歌清单就是置顶的那个文件（刚更新过，共 ${grey.length} 首）`;
+    return tg(env, 'sendMessage', { chat_id: chat, text: note, reply_parameters: { message_id: msgId, allow_sending_without_reply: true } });
+  }
+  return null;
+}
+
+const GREY_FILE = '小橘音乐-灰色歌.txt';
+
+async function tgForm(env, method, form) {
+  const res = await fetch(`${TG}/bot${env.TG_BOT_TOKEN}/${method}`, { method: 'POST', body: form });
   return res.json().catch(() => ({}));
 }
 
@@ -1820,7 +1856,7 @@ async function botUpdate(env, update, origin) {
     if (/^(进度|搬到哪了|同步进度)$/.test(t)) return ownerProgress(env, chat);
     if (/^灰色歌(曲|单)?$/.test(t)) {
       try { await pullGrey(env); } catch {}  // 先把流式服务刚记下的取过来（取不到就用存着的）
-      return sendGreyFile(env, chat, '⬜ 灰色歌清单（网易云上没有音源，只记了信息；网页上灰色显示、不能播）');
+      return sendGreyFile(env, chat, 0, true);
     }
     if ((c = /^爬\s*(.*?)(?:\s+(\d{1,3})\s*首?)?$/.exec(t))) {
       if (!c[1]) return say(env, chat, '爬什么？发「爬 歌名或歌手」，比如「爬 小橘 30」');

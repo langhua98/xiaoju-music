@@ -181,6 +181,7 @@
 | `auto` | 夜里自动搬的记录 `{state: {频道: 最大消息号}, runId, lastStart, lastCopied}` |
 | `netease` | 网易云登录 `{cookie, nickname, at}`。**cookie 是密钥，不能打日志、不能出现在任何响应里** |
 | `neteaseAlts` | 小号列表 `[{id, name, url, at}]` |
+| `greyMsg` | 灰色歌清单那条置顶消息 `{chat, id}`：有新的灰色歌就 `editMessageMedia` 替换它的文件，不发新文件 |
 | `health` | 自检结果 |
 | `fillCursor` | 后台补全看到哪个消息号了 |
 | `photosScanned` | 老图片帖扫过没有 |
