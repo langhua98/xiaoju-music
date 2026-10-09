@@ -503,6 +503,22 @@ async function fillMissing(env) {
   return { done, fails, covers: covers.length, lyrics: words.length, hot };
 }
 
+// 同步小号时顺手把这几个号的热门 50 首记下来，网页歌手页马上按它排，不用等后台慢慢轮到。
+// 小号记着网易云歌手编号，不用再搜：一个号 1 个子请求。最多 ALT_HOT_MOST 个，其余的交给后台补全；出错就算了，后台会再取
+const ALT_HOT_MOST = 5;
+async function altHot(env, alts) {
+  const L = lib(env);
+  for (const a of alts.filter(x => x.id && x.name).slice(0, ALT_HOT_MOST)) {
+    try {
+      const songs = await neteaseTopSongs(a.id);
+      if (songs.length) await L.putHot(a.name, songs, Date.now() + HOT_REFRESH_MS);
+    } catch {
+      // 网易云抽风：留给后台补全
+    }
+  }
+  listCache = null;
+}
+
 // ── 歌手的热门歌：网易云歌手页的「热门 50 首」。网页的歌手页按它排，不然新搬来的冷门歌全排在前面 ──
 const HOT_BATCH = 1;                  // 每轮最多补几位歌手（一天最多 288 位；歌多的歌手先，常听的头几个小时就有了）
 const HOT_REFRESH_MS = 7 * DAY_MS;    // 热门会变：一周重取一次
@@ -525,7 +541,13 @@ async function neteaseHot(name) {
   const a = ((j.result && j.result.artists) || []).find(x =>
     [x.name, x.trans, ...(x.alias || []), ...(x.transNames || [])].some(n => norm(n) === want));
   if (!a) return [];
-  const d = await getJson(`${NETEASE}/artist/top/song?id=${a.id}`, { headers });
+  return neteaseTopSongs(a.id);
+}
+
+// 网易云歌手编号 → 热门 50 首的歌名（按网易云的顺序）。出错抛异常
+async function neteaseTopSongs(id) {
+  const headers = { 'User-Agent': UA, Referer: 'https://music.163.com/' };
+  const d = await getJson(`${NETEASE}/artist/top/song?id=${encodeURIComponent(id)}`, { headers });
   if (!d || d.code !== 200) throw new Error(`artist/top/song → code ${d && d.code}`);
   return (d.songs || []).map(x => String(x.name || '')).filter(Boolean).slice(0, 50);
 }
@@ -1954,6 +1976,7 @@ async function syncAlts(env, chat, alts) {
   } catch {
     r = { status: 0, data: {} };
   }
+  await altHot(env, alts);
   const names = alts.map(a => a.name || a.id).join('、');
   if (r.status === 200) {
     return say(env, chat, `开始同步小号「${names}」：每个号看热门前 50 首，库里没有的直接发进${h.channel ? `测试频道 @${h.channel}` : '频道'}，不用审核，发完告诉你。`);

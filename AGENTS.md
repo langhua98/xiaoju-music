@@ -108,7 +108,7 @@
 | 音柱 | `viz()` | 请流式服务 `/viz/`，存 base64；空字符串 = 确定算不了 |
 | 自检 | `selfCheck()`、`healthLines()`、`CHECK_EVERY_MS` | 跟着 */5 定时任务跑，每小时真跑一次；结果存在 config 的 `health` |
 | 后台补全 | `FILL_CRON`、`FILL_BATCH`、`fillMissing()` | 按消息号顺序每次看 8 首（游标 `fillCursor`），连着错 3 次就停；这一轮没有封面歌词要补时才取 `HOT_BATCH`（1）位歌手的热门歌（子请求、CPU 都紧） |
-| 歌手热门歌 | `HOT_*`、`artistsOf()`、`neteaseHot()`、`hotOrder()` | 网易云 `search/get`（type=100，名字完全一样才算）→ `artist/top/song?id=`；`/api/tracks` 的 `hot` 由 `hotOrder()` 算 |
+| 歌手热门歌 | `HOT_*`、`artistsOf()`、`neteaseHot()`、`hotOrder()` | 网易云 `search/get`（type=100，名字完全一样才算）→ `artist/top/song?id=`；`/api/tracks` 的 `hot` 由 `hotOrder()` 算；同步小号时 `altHot()` 按小号的歌手编号直接取（不搜） |
 | 歌词 | `lyrics()`、`findLyrics()`、`fromLrclib()`、`fromNetease()`、`parseLrc()`、`attachLyrics()`、`decodeText()` | 时长差 3 秒内才用时间轴；手动 `.lrc`（`src='manual'`）自动结果盖不掉 |
 | 音频流 | `audio()`、`parseRange()`、`fromBotApi()`、`fromStreamer()`、`passthrough()`、`fetchFile()`、`filePath()` | iOS Safari 必须有 206；流式服务没醒回 503 + `Retry-After` |
 | 数据库 | `class Library` | 建表、一次性迁移都在构造函数里；方法都是 RPC，参数和返回值会被结构化克隆 |

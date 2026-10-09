@@ -149,7 +149,7 @@ globalThis.fetch = async (input, init = {}) => {
       .map(a => ({ id: a.id, name: a.name, alias: a.alias || [] })) } });
   }
   if ((m = url.match(/^https:\/\/music\.163\.com\/api\/artist\/top\/song\?id=(\d+)$/))) {
-    const a = neteaseArtists.find(x => x.id === Number(m[1]));
+    const a = neteaseArtists.find(x => x.id === Number(m[1])) || { hot: [] };
     return Response.json({ code: 200, more: true, songs: a.hot.map((name, i) => ({ id: 1000 + i, name })) });
   }
   if ((m = url.match(/^https:\/\/music\.163\.com\/api\/song\/lyric\?id=(\d+)&/))) {
@@ -946,6 +946,7 @@ await t('贴网址搬运：搬运设置可以开关网站和授权、改数量�
   bot.harvestBusy = null;
   // 主页（歌手主页、音乐人的用户主页）：记成小号，马上同步，新歌不审核直接发
   bot.describe = { site: '网易云音乐 music.163.com', kind: 'artist', name: '小橘', id: '9' };
+  neteaseArtists.push({ id: 9, name: '小橘', hot: ['小橘最火的歌', '第二火的'] });
   await dm(OWNER, '搬运频道 正式');
   const before = bot.toStreamer.length;
   await dm(OWNER, 'https://music.163.com/#/user/home?id=77 5');
@@ -958,6 +959,7 @@ await t('贴网址搬运：搬运设置可以开关网站和授权、改数量�
   const told = bot.out.filter(o => o.method === 'sendMessage').slice(-2).map(o => o.text);
   assert.match(told[0], /加了小号「小橘」（第 1 个）。以后它热门前 50 首里库里没有的，不用审核，直接发进频道/);
   assert.match(told[1], /开始同步小号「小橘」：每个号看热门前 50 首，库里没有的直接发进频道，不用审核/);
+  assert.deepEqual((await lib.listHot())['小橘'], ['小橘最火的歌', '第二火的'], '同步小号时马上记下热门 50 首，歌手页不用等后台');
   await dm(OWNER, 'https://music.163.com/artist?id=9');
   assert.match(bot.out.filter(o => o.method === 'sendMessage').at(-2).text, /已经是小号了/);
   assert.equal(JSON.parse(await lib.getConfig('neteaseAlts')).length, 1, '同一个号不加两次');
