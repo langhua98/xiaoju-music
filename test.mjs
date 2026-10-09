@@ -156,7 +156,7 @@ globalThis.fetch = async (input, init = {}) => {
     return Response.json({ code: 200, lrc: { version: 1, lyric: neteaseLyrics.get(Number(m[1])) || '' } });
   }
   // 机器人要用的流式服务接口：记下收到的请求，按 bot 里设好的回
-  if ((m = url.match(/^https:\/\/streamer\.example\/(fulfill|copy\/start|copy\/pick|auto\/start|auto\/status|search\/global|harvest|harvest\/count|harvest\/describe|harvest\/alts|harvest\/review(?:\/[a-z0-9]+)?|netease\/login|netease\/session|netease\/check)(?:\?(.*))?$/)) || url === STREAMER + '/') {
+  if ((m = url.match(/^https:\/\/streamer\.example\/(fulfill|copy\/start|copy\/pick|auto\/start|auto\/status|search\/global|harvest|harvest\/count|harvest\/describe|harvest\/alts|harvest\/review(?:\/[a-z0-9]+)?|harvest\/status|copy\/status|netease\/login|netease\/session|netease\/check)(?:\?(.*))?$/)) || url === STREAMER + '/') {
     if (bot.streamerDown) throw new TypeError('fetch failed');
     if (url === STREAMER + '/') return Response.json({ ok: true });
     assert.equal(headers.get('X-Key'), SKEY);
@@ -171,6 +171,8 @@ globalThis.fetch = async (input, init = {}) => {
     if (m[1] === 'harvest/describe') return Response.json(bot.describe || {});
     if (m[1] === 'harvest/alts') return bot.harvestBusy ? Response.json({ detail: bot.harvestBusy }, { status: 409 }) : Response.json({ ok: true });
     if (m[1] === 'netease/session') return Response.json(bot.netease || {});
+    if (m[1] === 'harvest/status') return Response.json(bot.harvestState || { status: 'idle' });
+    if (m[1] === 'copy/status') return Response.json(bot.copyState || { logged_in: true, status: 'idle' });
     if (m[1] === 'netease/check') return Response.json(bot.check || { login: false, songs: [], channel: { ok: true, title: '小橘🍊音乐' } });
     if (m[1].startsWith('harvest/review/')) return bot.sheet ? Response.json(bot.sheet) : Response.json({ detail: 'no such sheet' }, { status: 404 });
     if (m[1] === 'harvest') {
@@ -958,7 +960,26 @@ await t('贴网址搬运：搬运设置可以开关网站和授权、改数量�
   assert.ok(Array.isArray(cnt.body.existing) && 'cookie' in cnt.body && cnt.body.channel === '');
   const told = bot.out.filter(o => o.method === 'sendMessage').slice(-2).map(o => o.text);
   assert.match(told[0], /加了小号「小橘」（第 1 个）。以后它热门前 50 首里库里没有的，不用审核，直接发进频道/);
-  assert.match(told[1], /开始同步小号「小橘」：每个号看热门前 50 首，库里没有的直接发进频道，不用审核/);
+  assert.match(told[1], /开始同步小号「小橘」：每个号看热门前 50 首，库里没有的直接发进频道，不用审核.*发「进度」/);
+  // 进度：同步小号做到哪了
+  bot.harvestState = { status: 'running', kind: 'direct', alts: ['小橘'], total: 0, copied: 0, have: 0, results: [] };
+  await dm(OWNER, '⏳ 进度');
+  assert.equal(lastSay().text, '🔄 正在同步小号「小橘」：在看热门前 50 首，找库里没有的');
+  bot.harvestState = { ...bot.harvestState, total: 12, copied: 3, have: 38, results: [1, 2, 3, 4] };
+  bot.copyState = { logged_in: true, status: 'running', mode: 'auto', scanned: 40, copied: 5, skipped_dup: 2, skipped_lang: 1, skipped_other: 0 };
+  await dm(OWNER, '进度');
+  assert.equal(lastSay().text, '🔄 正在同步小号「小橘」：12 首新歌，已发 3 首，处理到第 4 首；38 首库里已有，不发\n\n🔄 正在夜里自动搬：看了 40 首，搬了 5 首，跳过 3 首');
+  bot.harvestState = { status: 'error', kind: 'direct', alts: ['小橘'], total: 12, copied: 7, have: 38, results: [], error: 'RuntimeError: 网易云接口出错' };
+  bot.copyState = null;
+  await dm(OWNER, '进度');
+  assert.equal(lastSay().text, '✅ 上一单（同步小号「小橘」）出错停了（RuntimeError: 网易云接口出错），发了 7 首，没发 5 首；38 首库里已有，不发');
+  bot.harvestState = null;
+  await dm(OWNER, '进度');
+  assert.match(lastSay().text, /^现在没有在搬的活/);
+  bot.streamerDown = true;
+  await dm(OWNER, '进度');
+  assert.equal(lastSay().text, '搬运服务正在唤醒，过一两分钟再发「进度」');
+  bot.streamerDown = false;
   assert.deepEqual((await lib.listHot()).songs['小橘'], ['小橘最火的歌', '第二火的'], '同步小号时马上记下热门 50 首，歌手页不用等后台');
   assert.equal((await lib.listHot()).pics['小橘'], 'https://p1.music.126.net/art9.jpg', '按小号的编号认人，顺带记下头像');
   await dm(OWNER, 'https://music.163.com/artist?id=9');
@@ -1182,13 +1203,16 @@ await t('频道主的菜单：常驻按钮和 / 命令（只设给频道主）�
   const help = lastSay();
   assert.match(help.text, /🎵 音乐/);
   assert.doesNotMatch(help.text, /运行爬虫|搜抖音|审核/);
-  assert.deepEqual(help.reply_markup.keyboard[0], ['📈 统计', '🎵 搬运设置']);
+  assert.deepEqual(help.reply_markup.keyboard[0], ['📈 统计', '⏳ 进度']);
+  assert.ok(set.commands.some(c => c.command === 'tasks'));
   const n = bot.out.filter(o => o.method === 'setMyCommands').length;
   await dm(OWNER, '❓ 帮助');
   assert.equal(bot.out.filter(o => o.method === 'setMyCommands').length, n, '设过一次就不再设');
   assert.match(lastSay().text, /全部功能/);
   await dm(OWNER, '📈 统计');
   assert.match(lastSay().text, /歌库一共/);
+  await dm(OWNER, '/tasks');
+  assert.match(lastSay().text, /没有在搬的活|正在|上一单/);
   await dm(OWNER, '/harvest@xiaoju_music_bot');
   assert.match(lastSay().text, /搬运设置/);
   await dm(FAN + 6, '/start');
