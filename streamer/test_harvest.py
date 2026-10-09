@@ -97,8 +97,18 @@ def test_netease_user_homepage_is_the_musician_and_counting(monkeypatch):
 
     async def hot(url):
         return [t.title async for t in NetEase(NE).hot(url, http)]
+
+    async def hot_with(url, cookie):
+        return [t.title async for t in NetEase(NE).hot(url, http, cookie)]
     assert asyncio.run(hot(home)) == ['热门', '次热门'], '主页的热门 50 首'
     assert asyncio.run(hot('https://music.163.com/album?id=5')) == [], '不是主页没有热门'
+
+    # 登录过就带上 cookie：海外机房不登录去要，网易云常常给 0 首
+    pages[NE + '/user/detail?cookie=MUSIC_U=x&uid=77'] = pages[NE + '/user/detail?uid=77']
+    pages[NE + '/artist/top/song?cookie=MUSIC_U=x&id=9'] = pages[NE + '/artist/top/song?id=9']
+    http.asked.clear()
+    assert asyncio.run(hot_with(home, 'MUSIC_U=x')) == ['热门', '次热门']
+    assert http.asked == [NE + '/user/detail?cookie=MUSIC_U=x&uid=77', NE + '/artist/top/song?cookie=MUSIC_U=x&id=9']
 
     monkeypatch.setattr('harvest.job.find_adapter', lambda url: NetEase(NE))
     h = Harvester(http=http, send=None)
@@ -426,6 +436,30 @@ def test_alt_sync_with_nothing_new():
         await h.task
     asyncio.run(main())
     assert said == ['👥 同步小号「小橘」：热门前 50 首都在小橘音乐里了（1 首）']
+
+
+def test_alt_sync_says_so_when_the_homepage_gives_no_songs():
+    said, got = [], []
+
+    class Hot(Site):
+        async def hot(self, url, http, cookie=''):
+            got.append((url, cookie))
+            for t in {'u2': [Track('旧歌', '小橘', '', 'p')]}.get(url, []):
+                yield t
+
+    async def say(chat, text, buttons=None):
+        said.append(text)
+
+    async def main(alts):
+        h = Harvester(http=None, send=None, say=say)
+        h.check_url = lambda *a: (Hot([]), None)
+        h.start_direct(alts, SETTINGS, [('旧歌', '小橘')], notify=9, cookie='MUSIC_U=x')
+        await h.task
+    asyncio.run(main([{'url': 'u1', 'name': '小橘'}]))
+    assert got == [('u1', 'MUSIC_U=x')], '拉热门歌带上登录 cookie'
+    assert said[-1].startswith('👥 同步小号「小橘」：网易云没给热门歌（小橘 一首都没拿到）'), '0 首不能说成「都在库里了」'
+    asyncio.run(main([{'url': 'u1', 'name': '小橘'}, {'url': 'u2', 'name': '朋友'}]))
+    assert said[-1] == '👥 同步小号「小橘、朋友」：热门前 50 首都在小橘音乐里了（1 首）；小橘 没拿到热门歌'
 
 
 def test_rejecting_a_sheet_posts_nothing():

@@ -592,3 +592,27 @@ def test_music_prefixed_settings_win(monkeypatch):
     client = TestClient(appmod.app)
     assert client.get('/stream/12', headers={'X-Key': 'video-key'}).status_code == 403
     assert client.get('/stream/12', headers={'X-Key': 'music-key'}).status_code == 200
+
+
+def test_self_check_reports_a_homepage_with_no_hot_songs(monkeypatch):
+    monkeypatch.setenv('STREAMER_KEY', 'k1')
+    asked = []
+
+    class Http:
+        def __init__(self, **kw):
+            pass
+
+        async def get_json(self, url, params=None):
+            path = url.split('3017', 1)[1]
+            asked.append((path, (params or {}).get('cookie')))
+            if path == '/user/account':
+                return {'code': 200, 'profile': {'nickname': '小橘'}, 'account': {'vipType': 11}}
+            return {'code': 200, 'songs': []}  # 网易云给了 0 首
+
+    monkeypatch.setattr(appmod, 'Http', Http)
+    monkeypatch.setattr(appmod, 'user_client', None)
+    r = TestClient(appmod.app).post('/netease/check', headers={'X-Key': 'k1'},
+                                    json={'cookie': 'MUSIC_U=x', 'alts': ['https://music.163.com/#/artist?id=9']}).json()
+    assert r['login'] and r['songs'] == []
+    assert r['error'] == '小号主页没取到热门歌（网易云给了 0 首）'
+    assert ('/artist/top/song', 'MUSIC_U=x') in asked, '拉热门歌带上登录 cookie'
