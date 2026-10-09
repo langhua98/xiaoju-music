@@ -59,3 +59,7 @@ async def publish(track, *, http, send, convert=to_mp3, measure=probe_seconds):
 
 class UploadError(Exception):
     pass
+
+
+class NoSource(UploadError):
+    """网站上就没有音源（没版权、下架、要单独购买）：不是登录、会员的问题，重试也没用。这种歌只记信息，网页上显示成灰色"""

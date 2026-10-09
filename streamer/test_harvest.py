@@ -8,7 +8,7 @@ from fastapi.testclient import TestClient
 import app as appmod
 from harvest.job import Harvester
 from harvest.sites import NetEase, Track, find_adapter
-from harvest.upload import OWN, UploadError, caption, publish
+from harvest.upload import OWN, NoSource, UploadError, caption, publish
 
 SETTINGS = {'sites': ['netease'], 'limit': 10}
 
@@ -152,8 +152,24 @@ def test_netease_download_needs_a_full_song_not_a_trial():
     assert (got.audio_url, got.size, got.ext, got.title) == ('http://m701.music.126.net/a.mp3', 3158561, 'mp3', '晴天')
     with pytest.raises(UploadError, match='试听片段（会员过期了'):
         dl({'code': 200, 'data': [{'id': 11, 'url': 'http://x/a.mp3', 'freeTrialInfo': {'start': 0, 'end': 30}}]})
-    with pytest.raises(UploadError, match='先发「网易云登录」'):
+    with pytest.raises(UploadError, match='先发「网易云登录」') as e:
         dl({'code': 200, 'data': [{'id': 11, 'url': None}]}, cookie='')
+    assert not isinstance(e.value, NoSource), '没登录：不算灰色歌，登录了就能下'
+    with pytest.raises(NoSource, match='下架了，或者要单独购买'):
+        dl({'code': 200, 'data': [{'id': 11, 'url': None}]})
+
+
+def test_netease_info_of_a_song_without_a_source():
+    t = Track('天黑黑', '孙燕姿', '', 'https://music.163.com/song?id=11', 233.7, sid='11')
+    detail = {'code': 200, 'songs': [{'id': 11, 'name': '天黑黑', 'fee': 1, 'pop': 100, 'dt': 233733, 'publishTime': 1179158400000,
+                                      'al': {'name': 'My Story 2006 新歌+精选'}}], 'privileges': [{'id': 11, 'st': -200, 'fee': 1}]}
+    http = FakeHttp({NE + '/song/detail?cookie=MUSIC_U=x&ids=11': detail})
+    got = asyncio.run(NetEase(NE).info(t, http, 'MUSIC_U=x'))
+    assert got == {'sid': '11', 'title': '天黑黑', 'artist': '孙燕姿', 'album': 'My Story 2006 新歌+精选', 'year': '2007',
+                   'duration': 234, 'pop': 100, 'why': '网易云没版权', 'page': 'https://music.163.com/song?id=11'}
+    detail['privileges'][0]['st'] = 0
+    detail['songs'][0]['fee'] = 4
+    assert asyncio.run(NetEase(NE).info(t, http, 'MUSIC_U=x'))['why'] == '要单独购买专辑'
 
 
 # ── 上传 ──
@@ -421,6 +437,46 @@ def test_alt_sync_posts_new_songs_without_a_sheet():
     text = said[0][1]
     assert text.startswith('👥 同步小号「小橘、朋友」：热门前 50 首里新歌 3 首，发进频道 2 首，没发 1 首（1 首库里已有）')
     assert '下架：网易云不给下载' in text and h.sheets == {}
+
+
+def test_songs_without_a_source_are_remembered_as_grey(monkeypatch):
+    said = []
+
+    class Grey(Site):
+        async def download(self, t, http, cookie):
+            if t.title == '没版权':
+                raise NoSource('网易云不给下载（下架了，或者要单独购买）')
+            raise UploadError('网易云只给试听片段（会员过期了？续上再发「网易云登录」）')
+
+        async def info(self, t, http, cookie):
+            if t.sid == '2':
+                raise RuntimeError('网易云抽风')
+            return {'sid': t.sid, 'title': t.title, 'artist': t.artist, 'album': '专辑', 'year': '2006', 'duration': 200,
+                    'pop': 90, 'why': '网易云没版权', 'page': t.page_url}
+
+    async def say(chat, text, buttons=None):
+        said.append(text)
+
+    tracks = [Track('没版权', '甲', '', 'p1', 200, sid='1'), Track('没版权', '乙', '', 'p2', 100, sid='2'),
+              Track('会员歌', '甲', '', 'p3', sid='3')]
+
+    async def main():
+        h = Harvester(http=None, send=None, say=say)
+        h.check_url = lambda *a: (Grey(tracks), None)
+        h.start_direct([{'url': 'u', 'name': '小橘'}], SETTINGS, [], notify=9, cookie='MUSIC_U=x')
+        await h.task
+        return h
+    h = asyncio.run(main())
+    grey = list(h.grey.values())
+    assert [(g['sid'], g['title'], g['album'], g['why']) for g in grey] == [('1', '没版权', '专辑', '网易云没版权'),
+                                                                       ('2', '没版权', '', '网易云不给下载（下架了，或者要单独购买）')]
+    assert all(g['at'] > 0 for g in grey), '信息拿不到也照样记歌名、歌手'
+    assert '⬜ 其中 2 首网易云上没有音源' in said[-1], '只给试听的是会员问题，不算灰色'
+    monkeypatch.setenv('STREAMER_KEY', 'k1')
+    monkeypatch.setattr(appmod, 'harvester', h)
+    c = TestClient(appmod.app)
+    assert c.get('/harvest/grey').status_code == 403
+    assert [g['sid'] for g in c.get('/harvest/grey', headers={'X-Key': 'k1'}).json()['songs']] == ['1', '2']
 
 
 def test_alt_sync_with_nothing_new():

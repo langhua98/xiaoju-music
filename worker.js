@@ -97,6 +97,7 @@ export default {
       // 每小时（整点那一轮）给 KV 存一份快照，数据库挂了时网页靠它照样能听
       if (new Date(controller.scheduledTime || Date.now()).getUTCMinutes() < 5) {
         ctx.waitUntil(saveSnapshot(env).then(ok => console.log('snapshot', ok), e => console.log('snapshot failed', String(e))));
+        ctx.waitUntil(pullGrey(env).then(n => console.log('grey', n), e => console.log('grey failed', String(e))));
       }
       ctx.waitUntil(selfCheck(env, false).then(h => console.log('self-check', JSON.stringify({ at: h.at, login: h.login, songs: h.songs, channel: h.channel, error: h.error })),
         e => console.log('self-check failed', String(e))));
@@ -338,8 +339,11 @@ async function tracksFor(env) {
 }
 
 async function listBody(env) {
-  const [tracks, playlists, hot] = await Promise.all([tracksFor(env), lib(env).listPlaylists(), lib(env).listHot()]);
-  return JSON.stringify({ channel: env.CHANNEL_USERNAME || '', tracks, playlists, hot: hotOrder(tracks, hot.songs), pics: hot.pics });
+  const [tracks, playlists, hot, grey] = await Promise.all([tracksFor(env), lib(env).listPlaylists(), lib(env).listHot(), lib(env).listGrey()]);
+  return JSON.stringify({
+    channel: env.CHANNEL_USERNAME || '', tracks, playlists, hot: hotOrder(tracks, hot.songs), pics: hot.pics,
+    grey: stillGrey(grey, tracks).map(({ sid, title, artist, album, year, duration, why }) => ({ sid, title, artist, album, year, duration, why })),
+  });
 }
 
 async function trackList(env) {
@@ -376,6 +380,120 @@ async function getRec(env, id) {
   if (recCache.size > 500) recCache.clear();
   recCache.set(id, { rec, exp: Date.now() + REC_TTL_MS });
   return rec;
+}
+
+// ── 灰色歌：网易云上没有音源（没版权、下架、要单独购买）的歌，不下载，只记信息 ──
+// 流式服务发歌时遇到了就记在它内存里（harvest/job.py 的 _remember_grey），Worker 每小时（还有频道主发「进度」「灰色歌」时）
+// 来 GET /harvest/grey 取走存进数据库：流式服务连不到 Worker，只能 Worker 去取。网页上显示成灰色、不能播；
+// 有新的就把整份清单做成 txt 发给频道主
+const GREY_FIELDS = { sid: 20, title: 200, artist: 200, album: 200, year: 4, why: 40, page: 200 };
+
+function cleanGrey(g) {
+  if (!g || typeof g !== 'object') return null;
+  const out = {};
+  for (const [k, n] of Object.entries(GREY_FIELDS)) out[k] = String(g[k] == null ? '' : g[k]).slice(0, n);
+  if (!/^\d{1,20}$/.test(out.sid) || !out.title) return null;
+  if (out.page && !/^https:\/\/music\.163\.com\//.test(out.page)) out.page = '';
+  out.duration = Math.max(0, Math.min(Math.round(Number(g.duration) || 0), 36000));
+  out.pop = Math.max(0, Math.min(Math.round(Number(g.pop) || 0), 100));
+  return out;
+}
+
+// 后来有了音源、搬进来了的（同名同歌手）就不再算灰色
+function stillGrey(grey, tracks) {
+  const have = new Set(tracks.map(t => norm(t.title) + '|' + norm(t.artist)));
+  return grey.filter(g => !have.has(norm(g.title) + '|' + norm(g.artist)));
+}
+
+// → 这次新记下几首。有新的：网页的歌单缓存作废，清单 txt 发给频道主
+async function pullGrey(env) {
+  if (!streamerOn(env)) return 0;
+  const { status, data } = await streamerCall(env, '/harvest/grey');
+  if (status !== 200 || !Array.isArray(data.songs)) return 0;
+  const fresh = await lib(env).addGrey(data.songs.map(cleanGrey).filter(Boolean).slice(0, 2000));
+  if (fresh) {
+    listCache = null;
+    const owner = await ownerId(env);
+    if (owner) await sendGreyFile(env, owner, fresh);
+  }
+  return fresh;
+}
+
+function fmtYearTime(g) {
+  return [g.year, g.duration ? fmt(g.duration) : ''].filter(Boolean).join(' · ');
+}
+function fmt(sec) {
+  return `${Math.floor(sec / 60)}:${String(sec % 60).padStart(2, '0')}`;
+}
+
+// 清单：按歌手分组（歌多的歌手在前），每首一行歌名、专辑、年份、时长、为什么没音源、热度，下一行网易云地址
+function greyText(grey) {
+  const by = new Map();
+  for (const g of grey) {
+    const a = g.artist || '（没写歌手）';
+    if (!by.has(a)) by.set(a, []);
+    by.get(a).push(g);
+  }
+  const day = new Date(Date.now() + 8 * 3600e3).toISOString().slice(0, 10);
+  const lines = [`小橘音乐 · 灰色歌（网易云上没有音源，只记了信息）`, `共 ${grey.length} 首，${by.size} 位歌手，${day} 更新`, ''];
+  for (const [a, songs] of [...by].sort((x, y) => y[1].length - x[1].length || x[0].localeCompare(y[0], 'zh'))) {
+    lines.push(`【${a}】${songs.length} 首`);
+    for (const g of songs.sort((x, y) => y.pop - x.pop)) {
+      const meta = [g.album && `《${g.album}》`, fmtYearTime(g), g.why, g.pop ? `热度 ${g.pop}` : ''].filter(Boolean).join(' · ');
+      lines.push(`  ${g.title}${meta ? ' — ' + meta : ''}`);
+      if (g.page) lines.push(`    ${g.page}`);
+    }
+    lines.push('');
+  }
+  return lines.join('\n');
+}
+
+// 清单只有一份：第一次发成文件、置顶，记下是哪条（config 的 greyMsg）；以后有新的就替换那条消息里的文件，聊天里不会一堆同名文件。
+// 替换文件不响通知，所以有新增时另发一句短提示。那条被删了（替换失败）就重发一条再置顶。
+// fresh：这次新增几首（0 = 没有新增，比如频道主自己要）；asked：频道主发「灰色歌」要的，回一句清单在哪
+async function sendGreyFile(env, chat, fresh, asked) {
+  const L = lib(env);
+  const grey = stillGrey(await L.listGrey(), await L.listTracks());
+  if (!grey.length) return say(env, chat, '还没有灰色歌：同步小号、发审核通过的歌时，网易云上没有音源的会记在这里。');
+  const artists = new Set(grey.map(g => g.artist)).size;
+  const day = new Date(Date.now() + 8 * 3600e3).toISOString().slice(5, 16).replace('T', ' ');
+  const caption = `⬜ 灰色歌清单（网易云上没有音源，只记了信息）：共 ${grey.length} 首，${artists} 位歌手，${day} 更新` + (fresh ? `，新增 ${fresh} 首` : '');
+  const file = () => new Blob([greyText(grey)], { type: 'text/plain;charset=utf-8' });
+  const saved = JSON.parse((await L.getConfig('greyMsg')) || '{}');
+  let msgId = 0;
+  if (saved.id && String(saved.chat) === String(chat)) {
+    const form = new FormData();
+    form.append('chat_id', String(chat));
+    form.append('message_id', String(saved.id));
+    form.append('media', JSON.stringify({ type: 'document', media: 'attach://list', caption }));
+    form.append('list', file(), GREY_FILE);
+    const r = await tgForm(env, 'editMessageMedia', form);
+    if (r.ok || /not modified/i.test(r.description || '')) msgId = saved.id;
+  }
+  if (!msgId) {  // 第一次，或者原来那条被删了：重发一条，置顶
+    const form = new FormData();
+    form.append('chat_id', String(chat));
+    form.append('caption', caption);
+    form.append('document', file(), GREY_FILE);
+    const r = await tgForm(env, 'sendDocument', form);
+    msgId = r.ok && r.result && r.result.message_id;
+    if (!msgId) return say(env, chat, '灰色歌清单发不出去，过一会儿发「灰色歌」再试');
+    await L.setConfig('greyMsg', JSON.stringify({ chat: String(chat), id: msgId }));
+    await tg(env, 'pinChatMessage', { chat_id: chat, message_id: msgId, disable_notification: true });
+    return null;  // 新文件本身会响通知，不用再说
+  }
+  if (fresh || asked) {
+    const note = fresh ? `⬜ 灰色歌清单更新了：新增 ${fresh} 首，现在共 ${grey.length} 首。就是置顶的那个文件` : `⬜ 灰色歌清单就是置顶的那个文件（刚更新过，共 ${grey.length} 首）`;
+    return tg(env, 'sendMessage', { chat_id: chat, text: note, reply_parameters: { message_id: msgId, allow_sending_without_reply: true } });
+  }
+  return null;
+}
+
+const GREY_FILE = '小橘音乐-灰色歌.txt';
+
+async function tgForm(env, method, form) {
+  const res = await fetch(`${TG}/bot${env.TG_BOT_TOKEN}/${method}`, { method: 'POST', body: form });
+  return res.json().catch(() => ({}));
 }
 
 // ── 数据库挂了时的兜底：KV 里的快照 ──
@@ -1176,6 +1294,8 @@ export class Library extends DurableObject {
       this.sql.exec('CREATE TABLE IF NOT EXISTS asks (uid INTEGER NOT NULL, at INTEGER NOT NULL)');
       // 歌手在网易云的热门歌（歌手页排序用）：songs 是歌名 JSON 数组（[] = 网易云上没这位歌手），过了 retry_at 重取
       this.sql.exec('CREATE TABLE IF NOT EXISTS artist_hot (name TEXT PRIMARY KEY, songs TEXT NOT NULL, retry_at INTEGER NOT NULL)');
+      // 灰色歌：网易云上没有音源、只记了信息的歌。sid 是网易云歌曲编号，info 是 JSON（见 worker 的 cleanGrey）
+      this.sql.exec('CREATE TABLE IF NOT EXISTS grey (sid TEXT PRIMARY KEY, info TEXT NOT NULL, at INTEGER NOT NULL)');
       // pic：网易云的歌手照片地址（p*.music.126.net），歌手页当头像；空 = 还没有
       if (!this.sql.exec('PRAGMA table_info(artist_hot)').toArray().some(r => r.name === 'pic')) {
         this.sql.exec("ALTER TABLE artist_hot ADD COLUMN pic TEXT NOT NULL DEFAULT ''");
@@ -1295,6 +1415,26 @@ export class Library extends DurableObject {
     for (const t of this.tracks) for (const a of artistsOf(t.artist)) count.set(a, (count.get(a) || 0) + 1);
     return [...count].filter(([a]) => !rows.has(a) || rows.get(a).retryAt <= now)
       .sort((x, y) => y[1] - x[1]).slice(0, n).map(([a]) => a);
+  }
+
+  // 灰色歌整张表（几百上千行）读一次记在内存里
+  async listGrey() {
+    if (!this.greyList) this.greyList = this.sql.exec('SELECT info FROM grey ORDER BY at DESC').toArray().map(r => JSON.parse(r.info));
+    return this.greyList;
+  }
+
+  // → 新记下几首（已经有的更新信息，不算新的）
+  async addGrey(list) {
+    const known = new Set((await this.listGrey()).map(g => g.sid));
+    let fresh = 0;
+    for (const g of list) {
+      if (!known.has(g.sid)) fresh++;
+      known.add(g.sid);
+      this.sql.exec(`INSERT INTO grey (sid, info, at) VALUES (?, ?, ?)
+        ON CONFLICT(sid) DO UPDATE SET info = excluded.info`, g.sid, JSON.stringify(g), Date.now());
+    }
+    if (list.length) this.greyList = null;
+    return fresh;
   }
 
   // pic 为空时留着原来的照片（这次没拿到不等于没有）
@@ -1641,6 +1781,7 @@ const HELP = `我是小橘音乐的管理助手 🍊 常用的点下面的按钮
 找 歌名 —— 在小橘音乐里找这首，可以加进/移出歌单、删除
 统计 —— 歌库和这几天搬歌的情况
 进度 —— 正在搬的活做到哪了（同步小号、往频道发歌、抓网址、从频道搬歌）
+灰色歌 —— 网易云上没有音源（没版权、下架、要单独购买）的歌：不下载，只记信息，网页上灰色显示；发这个要一份 txt 清单
 贴网易云主页链接（歌手主页、音乐人的用户主页） —— 记成小号：它热门前 50 首里库里没有的，不用你过目，直接发进频道（和小橘视频的小号一样）
 小号 —— 看加了哪些小号；「同步小号」现在把所有小号抓一遍；「删除小号 2」删第 2 个；每天凌晨 3 点自动同步
 贴专辑、歌单、单曲链接 —— 抓里面的歌，先列给你过目，确认是我们的歌点通过才发进频道；专辑、歌单会先告诉你一共几首、已有几首，点按钮选抓多少；后面直接加数量就不问了，比如「网址 30」
@@ -1713,6 +1854,10 @@ async function botUpdate(env, update, origin) {
     if ((c = /^找\s*(.+)$/.exec(t))) return ownerFind(env, chat, c[1].trim(), origin);
     if (/^(统计|今天搬了多少|搬了多少)/.test(t)) return ownerStats(env, chat);
     if (/^(进度|搬到哪了|同步进度)$/.test(t)) return ownerProgress(env, chat);
+    if (/^灰色歌(曲|单)?$/.test(t)) {
+      try { await pullGrey(env); } catch {}  // 先把流式服务刚记下的取过来（取不到就用存着的）
+      return sendGreyFile(env, chat, 0, true);
+    }
     if ((c = /^爬\s*(.*?)(?:\s+(\d{1,3})\s*首?)?$/.exec(t))) {
       if (!c[1]) return say(env, chat, '爬什么？发「爬 歌名或歌手」，比如「爬 小橘 30」');
       return ownerHarvest(env, chat, { query: c[1].slice(0, 60) }, c[2] ? Number(c[2]) : 0, origin);
@@ -1872,6 +2017,7 @@ async function ownerProgress(env, chat) {
     return say(env, chat, '搬运服务正在唤醒，过一两分钟再发「进度」');
   }
   if (h.status !== 200 && c.status !== 200) return say(env, chat, '搬运服务正在唤醒，过一两分钟再发「进度」');
+  try { await pullGrey(env); } catch {}  // 顺手把新记下的灰色歌取过来
   const lines = [harvestProgress(h.status === 200 ? h.data : null), copyProgress(c.status === 200 ? c.data : null)].filter(Boolean);
   return say(env, chat, lines.length ? lines.join('\n\n') : '现在没有在搬的活。（搬运服务重启过的话，之前那单的记录也没了）');
 }

@@ -8,6 +8,7 @@
 import html
 import os
 import re
+import time
 from dataclasses import dataclass, replace
 from urllib.parse import urlparse
 
@@ -129,16 +130,41 @@ class NetEase:
     async def download(self, track, http, cookie=''):
         """审核通过、要发帖时才取下载地址（地址几十分钟就过期）。→ 填好 audio_url、size、ext 的 Track。
         拿不到、或只给试听片段（没登录、会员过期）时抛 UploadError。"""
-        from .upload import UploadError
+        from .upload import NoSource, UploadError
         params = {'id': track.sid, 'level': self.LEVEL}
         if cookie:
             params['cookie'] = cookie
         x = ((await self._get(http, '/song/url/v1', **params)).get('data') or [{}])[0]
         if not x.get('url'):
-            raise UploadError('网易云不给下载' + ('（下架了，或者要单独购买）' if cookie else '（VIP 歌：先发「网易云登录」扫码登录）'))
+            if cookie:  # 登录了还不给：没版权、下架或者要单独购买，记成灰色歌
+                raise NoSource('网易云不给下载（下架了，或者要单独购买）')
+            raise UploadError('网易云不给下载（VIP 歌：先发「网易云登录」扫码登录）')
         if x.get('freeTrialInfo'):
             raise UploadError('网易云只给试听片段' + ('（会员过期了？续上再发「网易云登录」）' if cookie else '（VIP 歌：先发「网易云登录」扫码登录）'))
         return replace(track, audio_url=x['url'], size=int(x.get('size') or 0), ext=(x.get('type') or 'mp3').lower())
+
+    async def info(self, track, http, cookie=''):
+        """下不了音源的歌（灰色歌）：除了音源以外的信息。→ {sid, title, artist, album, year, duration, pop, why, page}"""
+        params = {'ids': track.sid}
+        if cookie:
+            params['cookie'] = cookie  # 带上账号，「能不能听」按这个账号算
+        d = await self._get(http, '/song/detail', **params)
+        s = (d.get('songs') or [{}])[0]
+        p = (d.get('privileges') or [{}])[0]
+        fee = s.get('fee', p.get('fee', 0))
+        if (p.get('st') or 0) < 0:
+            why = '网易云没版权'
+        elif fee == 4:
+            why = '要单独购买专辑'
+        else:
+            why = '网易云不给音源'
+        pub = s.get('publishTime') or 0
+        return {
+            'sid': str(track.sid), 'title': track.title, 'artist': track.artist,
+            'album': _text((s.get('al') or {}).get('name')), 'year': time.strftime('%Y', time.gmtime(pub / 1000)) if pub > 0 else '',
+            'duration': round(track.duration or (s.get('dt') or 0) / 1000), 'pop': int(s.get('pop') or 0),
+            'why': why, 'page': track.page_url,
+        }
 
     def _track(self, s):
         sid = s['id']
