@@ -125,7 +125,7 @@
 | 路径 | 作用 |
 |---|---|
 | `GET /` | 播放页 `page.html` |
-| `GET /api/tracks` | `{channel, tracks, playlists, hot}`，新的在前；`hot` 是歌手页排序用的 `{歌手: [消息号…]}`；每首有 `big`、`playable`，可能有 `art`；**绝不带 `file_id`** |
+| `GET /api/tracks` | `{channel, tracks, playlists, hot, pics}`，新的在前；`hot` 是歌手页排序用的 `{歌手: [消息号…]}`，`pics` 是歌手照片 `{歌手: 地址}`；每首有 `big`、`playable`，可能有 `art`；**绝不带 `file_id`** |
 | `GET /a/<id>[.ext]`（`?dl=1` 下载） | 音频，支持 Range |
 | `GET /c/<id>`（`?art=1` 只要自带专辑图） | 封面 |
 | `GET /l/<id>` | 歌词 `{src, synced, lines: [[秒, 这句], …]}` |
@@ -164,7 +164,7 @@
 | `viz` | `id`、`data`（base64；空字符串 = 确定算不了） |
 | `playlists` | `id`、`pos`、`name`、`cover`、`tracks`（消息号 JSON 数组） |
 | `asks` | 听众求歌记录 `uid`、`at`（每人 24 小时 10 次） |
-| `artist_hot` | 歌手在网易云的热门 50 首：`name`（我们这边的歌手名）、`songs`（歌名 JSON 数组，`[]` = 网易云上没这位）、`retry_at`（过了就重取）。整张表记在 DO 内存里 |
+| `artist_hot` | 歌手在网易云的热门 50 首：`name`（我们这边的歌手名）、`songs`（歌名 JSON 数组，`[]` = 网易云上没这位）、`retry_at`（过了就重取）、`pic`（网易云歌手照片地址，后来加的列）。整张表记在 DO 内存里 |
 | `config` | 键值对，见下表 |
 
 `config` 里的键：
@@ -411,7 +411,7 @@ Worker 和流式服务没法同时上线，所以改动要**两边都向后兼�
 ### 6.9 其他
 
 - 不要给 Worker 加 npm 依赖或构建步骤。它现在是一个能直接上传的 ES module，`package.json` 没有任何依赖。Worker 代码里不能用 Node 专有的 API（`fs`、`Buffer` 等），只能用 Workers 运行时的 Web API。
-- 页面不引外部脚本、CDN、字体，全部内联（`workers.dev` 在中国大陆本来就要 VPN，外部资源只会更慢、更容易挂）。
+- 页面不引外部脚本、CDN、字体，全部内联（`workers.dev` 在中国大陆本来就要 VPN，外部资源只会更慢、更容易挂）。唯一的例外是歌手页头像：直接从网易云的图片服务器（`p*.music.126.net`，国内很快）取，带 `referrerPolicy = 'no-referrer'`（不然被防盗链挡）、加载失败退回歌的封面；不经过 Worker，免得每张头像都占一次 Worker 请求。
 - 不要提交 `.venv/`、`__pycache__/`、`.pytest_cache/`、`.wrangler/`、`node_modules/`、`.dev.vars`。
 - 测试不能为了变绿而删掉、跳过或者放宽。测试挂了先找原因。
 

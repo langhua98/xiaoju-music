@@ -207,6 +207,21 @@ h1{font-size:20px;margin:0;line-height:1.2}
 .artist-head .who{flex:1;min-width:0}
 .artist-head .who b{display:block;font-size:17px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
 .artist-head .who span{font-size:12.5px;color:var(--faint)}
+.artist-head .thumb{width:56px;height:56px;margin-right:6px}
+/* 歌手列表分两段：「常听歌手」大圆头像宫格（5 首以上），「其他歌手」小行（2～4 首）；只有 1 首的不列，用搜索找 */
+.section{list-style:none;padding:14px 12px 8px;font-size:13px;font-weight:700;letter-spacing:.5px;color:var(--muted)}
+.section:first-child{padding-top:4px}
+.artist-grid{list-style:none;display:grid;grid-template-columns:repeat(auto-fill,minmax(96px,1fr));gap:10px 4px;padding:0 4px 4px}
+.acell{display:flex;flex-direction:column;align-items:center;gap:6px;min-width:0;padding:8px 4px;border:0;border-radius:14px;background:none;color:inherit;font:inherit;cursor:pointer;transition:background .15s}
+.acell .thumb{width:76px;height:76px;box-shadow:0 6px 16px rgba(0,0,0,.3)}
+.acell .thumb.noart::after{font-size:28px}
+.acell b{max-width:100%;font-size:13.5px;font-weight:600;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.acell span{font-size:11.5px;color:var(--faint);margin-top:-4px}
+@media (hover:hover){ .acell:hover{background:var(--hover)} }
+.count.tail{padding:16px 12px 8px;text-align:center}
+/* 歌手详情：「热门」一段带名次（网易云热门 50 首里的），「更多歌曲」一段新的在前 */
+.rank{width:22px;flex:none;text-align:center;font-size:14px;font-weight:700;color:var(--faint);font-variant-numeric:tabular-nums}
+.rank.top{color:var(--accent)}
 .playall{display:inline-flex;align-items:center;gap:6px;height:34px;padding:0 14px;border:0;border-radius:99px;background:var(--accent);color:var(--ink);font-weight:600;cursor:pointer;flex:none}
 .playall .ic{width:16px;height:16px}
 .thumb{position:relative;width:46px;height:46px;flex:none;border-radius:9px;overflow:hidden;background:linear-gradient(135deg,#57534e,#292524)}
@@ -604,6 +619,12 @@ h1{font-size:20px;margin:0;line-height:1.2}
   }
   var artistCache = null;
   var hotIds = {}; // 歌手 → 网易云热门 50 首里我们有的歌（消息号，按热门的顺序），/api/tracks 的 hot
+  var artistPics = {}; // 歌手 → 网易云的歌手照片（/api/tracks 的 pics），没有的用这位歌手第一首歌的封面
+  var BIG_ARTIST = 5;  // 5 首以上算「常听歌手」，大头像排在最上面
+  // 不是歌手的名字：DJ 上传者的标签（「Dj十七Edit」「DJ阿智」）、「Unknown Singer」。这些歌在「全部」里照样有，只是不单列成歌手
+  function notArtist(a){
+    return /(edit|remix|mix|混音|串烧)$/i.test(a) || /^dj.*[\u4e00-\u9fff]/i.test(a) || /未知|unknown|佚名/i.test(a);
+  }
   // 歌手页：热门歌按网易云的顺序排最前面，其余照旧（新的在前），不然新搬来的冷门歌全在上面
   function hotFirst(name, songs){
     var ids = hotIds[name];
@@ -616,7 +637,7 @@ h1{font-size:20px;margin:0;line-height:1.2}
   function artistIndex(){
     if(artistCache) return artistCache;
     var m = {};
-    tracks.forEach(function(t){ artistsOf(t).forEach(function(a){ (m[a] = m[a] || []).push(t); }); });
+    tracks.forEach(function(t){ artistsOf(t).forEach(function(a){ if(!notArtist(a)) (m[a] = m[a] || []).push(t); }); });
     artistCache = Object.keys(m).map(function(a){ return { name: a, songs: hotFirst(a, m[a]) }; })
       .sort(function(x, y){ return y.songs.length - x.songs.length || x.name.localeCompare(y.name, 'zh'); });
     return artistCache;
@@ -670,18 +691,69 @@ h1{font-size:20px;margin:0;line-height:1.2}
       sc.scrollTop = gridScroll[kind] || 0; // 回到刚才翻到的位置
     }
   }
+  // 歌手头像：有网易云的歌手照片就用（直接从网易云的图片服务器取，不经过 Worker，不占请求数；
+  // 不带 Referer，不然会被防盗链挡掉），取不到再用这位歌手第一首歌的封面
+  function avatar(g, holder){
+    var img = el('img');
+    img.alt = '';
+    img.loading = 'lazy';
+    holder.appendChild(img);
+    var pic = artistPics[g.name];
+    if(!pic){ cover(); return; }
+    face();
+    img.referrerPolicy = 'no-referrer';
+    img.onload = function(){ img.classList.add('ready'); };
+    img.onerror = cover;
+    img.src = pic + '?param=200y200';
+    // 封面也没有时画文字头像：颜色、字都按歌手名（不是那首歌的歌名）
+    function face(){
+      var me = { title: g.name, artist: '' };
+      holder.style.background = gradient(me);
+      holder.dataset.ch = firstChar(me);
+    }
+    function cover(){ coverImg(img, holder, g.songs[0].id); face(); }
+  }
+  function artistCell(g){
+    var b = el('button', 'acell');
+    b.type = 'button';
+    b.dataset.group = g.name;
+    var th = el('span', 'thumb round');
+    avatar(g, th);
+    b.appendChild(th);
+    b.appendChild(el('b', null, g.name));
+    b.appendChild(el('span', null, g.songs.length + ' 首'));
+    b.addEventListener('click', function(){ openGroup('artist', g.name); });
+    return b;
+  }
+  // 歌手列表：常听歌手（大头像宫格）→ 其他歌手（小行）→ 只有 1 首的不列，底下一行提示用搜索。歌手少（没有常听的）就照旧一行行列
+  function renderArtists(){
+    var all = groups('artist');
+    var big = all.filter(function(x){ return x.songs.length >= BIG_ARTIST; });
+    var mid = all.filter(function(x){ return x.songs.length > 1 && x.songs.length < BIG_ARTIST; });
+    var one = all.length - big.length - mid.length;
+    if(!big.length){
+      all.forEach(function(x){ list.appendChild(groupRow('artist', x)); });
+      return all.length;
+    }
+    list.appendChild(el('li', 'section', '常听歌手'));
+    var grid = el('li', 'artist-grid');
+    big.forEach(function(x){ grid.appendChild(artistCell(x)); });
+    list.appendChild(grid);
+    if(mid.length){
+      list.appendChild(el('li', 'section', '其他歌手'));
+      mid.forEach(function(x){ list.appendChild(groupRow('artist', x)); });
+    }
+    if(one) list.appendChild(el('li', 'count tail', '还有 ' + one + ' 位歌手各 1 首，用上面的搜索找'));
+    return all.length;
+  }
   function groupRow(kind, g){
     if(kind === 'list') return listCard(g);
     var li = el('li', 'row');
     li.dataset.group = g.key;
     var b = el('button', 'pick');
     b.type = 'button';
-    var th = el('span', kind === 'artist' ? 'thumb round' : 'thumb');
-    var img = el('img');
-    img.alt = '';
-    img.loading = 'lazy';
-    th.appendChild(img);
-    coverImg(img, th, byId[g.cover] ? g.cover : g.songs[0].id, kind === 'list');
+    var th = el('span', 'thumb round');
+    avatar(g, th);
     var info = el('span', 'info');
     info.appendChild(el('span', 'rt', g.name));
     info.appendChild(el('span', 'ra', g.songs.length + ' 首'));
@@ -756,6 +828,11 @@ h1{font-size:20px;margin:0;line-height:1.2}
     back.setAttribute('aria-label', kind === 'artist' ? '返回歌手列表' : '返回歌单列表');
     back.innerHTML = '<svg class="ic stroke"><use href="#i-back"/></svg>';
     back.addEventListener('click', function(){ openGroup(kind, null); });
+    var th = null;
+    if(kind === 'artist'){
+      th = el('span', 'thumb round');
+      avatar(g, th);
+    }
     var who = el('div', 'who');
     who.appendChild(el('b', null, g.name));
     who.appendChild(el('span', null, g.songs.length + ' 首'));
@@ -763,7 +840,9 @@ h1{font-size:20px;margin:0;line-height:1.2}
     all.type = 'button';
     all.innerHTML = '<svg class="ic"><use href="#i-play"/></svg>播放全部';
     all.addEventListener('click', function(){ playGroup(kind, g); });
-    li.appendChild(back); li.appendChild(who); li.appendChild(all);
+    li.appendChild(back);
+    if(th) li.appendChild(th);
+    li.appendChild(who); li.appendChild(all);
     return li;
   }
 
@@ -778,6 +857,13 @@ h1{font-size:20px;margin:0;line-height:1.2}
     usedArt = {};
     if(kind && !g){ // 组列表（打开的那组已经没有歌了也回到这里）
       prefs[OPEN[kind]] = null;
+      if(kind === 'artist' && !q){
+        shown = renderArtists();
+        $('status').hidden = !!shown;
+        $('status').textContent = shown ? '' : '还没有歌手';
+        mark();
+        return;
+      }
       if(!q) list.appendChild(el('li', 'count', kind === 'artist' ? '共 ' + groups(kind).length + ' 位歌手' : '共 ' + groups(kind).length + ' 个歌单'));
       groups(kind).forEach(function(x){
         if(q && x.name.toLowerCase().indexOf(q) < 0) return;
@@ -792,10 +878,19 @@ h1{font-size:20px;margin:0;line-height:1.2}
     if(g) list.appendChild(groupHead(kind, g));
     var src = fav ? favTracks() : rec ? recentTracks() : g ? g.songs : tracks;
     if(!g && !q && src.length) list.appendChild(el('li', 'count', (rec ? '最近听过 ' : '共 ') + src.length + ' 首'));
-    src.forEach(function(t){
+    // 歌手详情：前面是网易云热门 50 首里的（hotFirst 已经排好），分成「热门」「更多歌曲」两段，热门的带名次
+    var hotN = 0;
+    if(g && kind === 'artist' && !q){
+      var ids = {};
+      (hotIds[g.name] || []).forEach(function(id){ ids[id] = 1; });
+      while(hotN < src.length && ids[src[hotN].id]) hotN++;
+    }
+    src.forEach(function(t, i){
       if(q && (t.title + ' ' + t.artist).toLowerCase().indexOf(q) < 0) return;
+      if(hotN && i === 0) list.appendChild(el('li', 'section', '热门'));
+      if(hotN && i === hotN) list.appendChild(el('li', 'section', '更多歌曲'));
       shown++;
-      list.appendChild(row(t));
+      list.appendChild(row(t, i < hotN ? i + 1 : 0));
     });
     var s = $('status');
     s.hidden = !!shown;
@@ -814,11 +909,13 @@ h1{font-size:20px;margin:0;line-height:1.2}
     mark();
   }
 
-  function row(t){
+  // rank：歌手热门歌的名次（1 开始），0 = 不显示
+  function row(t, rank){
     var li = el('li', 'row' + (t.playable ? '' : ' off'));
     li.dataset.id = t.id;
     var b = el('button', 'pick');
     b.type = 'button';
+    if(rank) b.appendChild(el('span', 'rank' + (rank <= 3 ? ' top' : ''), String(rank)));
     var th = el('span', 'thumb');
     var img = el('img');
     img.alt = '';
@@ -1686,6 +1783,7 @@ h1{font-size:20px;margin:0;line-height:1.2}
       tracks = d.tracks || [];
       playlists = d.playlists || [];
       hotIds = d.hot || {};
+      artistPics = d.pics || {};
       artistCache = null;
       byId = {};
       tracks.forEach(function(t){ byId[t.id] = t; if(t.art === 0) seen[t.id] = false; }); // 确定没专辑图的直接画文字封面
