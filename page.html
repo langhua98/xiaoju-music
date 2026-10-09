@@ -603,11 +603,21 @@ h1{font-size:20px;margin:0;line-height:1.2}
     return String(t.artist || '').split(/[&＆、/,，]| x | feat\.? /i).map(function(a){ return a.trim(); }).filter(Boolean);
   }
   var artistCache = null;
+  var hotIds = {}; // 歌手 → 网易云热门 50 首里我们有的歌（消息号，按热门的顺序），/api/tracks 的 hot
+  // 歌手页：热门歌按网易云的顺序排最前面，其余照旧（新的在前），不然新搬来的冷门歌全在上面
+  function hotFirst(name, songs){
+    var ids = hotIds[name];
+    if(!ids || !ids.length) return songs;
+    var pos = {};
+    ids.forEach(function(id, i){ pos[id] = i; });
+    return songs.filter(function(t){ return t.id in pos; }).sort(function(x, y){ return pos[x.id] - pos[y.id]; })
+      .concat(songs.filter(function(t){ return !(t.id in pos); }));
+  }
   function artistIndex(){
     if(artistCache) return artistCache;
     var m = {};
     tracks.forEach(function(t){ artistsOf(t).forEach(function(a){ (m[a] = m[a] || []).push(t); }); });
-    artistCache = Object.keys(m).map(function(a){ return { name: a, songs: m[a] }; })
+    artistCache = Object.keys(m).map(function(a){ return { name: a, songs: hotFirst(a, m[a]) }; })
       .sort(function(x, y){ return y.songs.length - x.songs.length || x.name.localeCompare(y.name, 'zh'); });
     return artistCache;
   }
@@ -1675,6 +1685,7 @@ h1{font-size:20px;margin:0;line-height:1.2}
     }).then(function(d){
       tracks = d.tracks || [];
       playlists = d.playlists || [];
+      hotIds = d.hot || {};
       artistCache = null;
       byId = {};
       tracks.forEach(function(t){ byId[t.id] = t; if(t.art === 0) seen[t.id] = false; }); // 确定没专辑图的直接画文字封面

@@ -107,7 +107,8 @@
 | 封面 | `cover()`、`fetchCover()`、`neteaseCover()`、`photoCover()`、`fetchPhoto()`、`imageFrom()` | 顺序：自带缩略图 → 网易云专辑图 → 频道图片；台标识别 `isLogo()` |
 | 音柱 | `viz()` | 请流式服务 `/viz/`，存 base64；空字符串 = 确定算不了 |
 | 自检 | `selfCheck()`、`healthLines()`、`CHECK_EVERY_MS` | 跟着 */5 定时任务跑，每小时真跑一次；结果存在 config 的 `health` |
-| 后台补全 | `FILL_CRON`、`FILL_BATCH`、`fillMissing()` | 按消息号顺序每次看 8 首（游标 `fillCursor`），连着错 3 次就停 |
+| 后台补全 | `FILL_CRON`、`FILL_BATCH`、`fillMissing()` | 按消息号顺序每次看 8 首（游标 `fillCursor`），连着错 3 次就停；这一轮没有封面歌词要补时才取 `HOT_BATCH`（1）位歌手的热门歌（子请求、CPU 都紧） |
+| 歌手热门歌 | `HOT_*`、`artistsOf()`、`neteaseHot()`、`hotOrder()` | 网易云 `search/get`（type=100，名字完全一样才算）→ `artist/top/song?id=`；`/api/tracks` 的 `hot` 由 `hotOrder()` 算 |
 | 歌词 | `lyrics()`、`findLyrics()`、`fromLrclib()`、`fromNetease()`、`parseLrc()`、`attachLyrics()`、`decodeText()` | 时长差 3 秒内才用时间轴；手动 `.lrc`（`src='manual'`）自动结果盖不掉 |
 | 音频流 | `audio()`、`parseRange()`、`fromBotApi()`、`fromStreamer()`、`passthrough()`、`fetchFile()`、`filePath()` | iOS Safari 必须有 206；流式服务没醒回 503 + `Retry-After` |
 | 数据库 | `class Library` | 建表、一次性迁移都在构造函数里；方法都是 RPC，参数和返回值会被结构化克隆 |
@@ -124,7 +125,7 @@
 | 路径 | 作用 |
 |---|---|
 | `GET /` | 播放页 `page.html` |
-| `GET /api/tracks` | `{channel, tracks, playlists}`，新的在前；每首有 `big`、`playable`，可能有 `art`；**绝不带 `file_id`** |
+| `GET /api/tracks` | `{channel, tracks, playlists, hot}`，新的在前；`hot` 是歌手页排序用的 `{歌手: [消息号…]}`；每首有 `big`、`playable`，可能有 `art`；**绝不带 `file_id`** |
 | `GET /a/<id>[.ext]`（`?dl=1` 下载） | 音频，支持 Range |
 | `GET /c/<id>`（`?art=1` 只要自带专辑图） | 封面 |
 | `GET /l/<id>` | 歌词 `{src, synced, lines: [[秒, 这句], …]}` |
@@ -163,6 +164,7 @@
 | `viz` | `id`、`data`（base64；空字符串 = 确定算不了） |
 | `playlists` | `id`、`pos`、`name`、`cover`、`tracks`（消息号 JSON 数组） |
 | `asks` | 听众求歌记录 `uid`、`at`（每人 24 小时 10 次） |
+| `artist_hot` | 歌手在网易云的热门 50 首：`name`（我们这边的歌手名）、`songs`（歌名 JSON 数组，`[]` = 网易云上没这位）、`retry_at`（过了就重取）。整张表记在 DO 内存里 |
 | `config` | 键值对，见下表 |
 
 `config` 里的键：
@@ -429,7 +431,8 @@ Worker 和流式服务没法同时上线，所以改动要**两边都向后兼�
 | 审核单编号：14 位小写字母加数字 | `job.py` 的 `sheet_id()` | `worker.js` 路由的正则 `/^\/harvest-review\/([a-z0-9]{14})$/` |
 | 音柱格式：`XV` + 版本 1 + 帧率 + 频段数 + 每值 4 位 | `app.py` 的 `pack_viz()` | `worker.js` 的 `viz()`（检查开头 `0x58 0x56`）、`page.html` 的解包（只认版本 1）；改格式要升版本号，DO 里存着的旧数据也得能处理 |
 | 流式服务的「确定没有」是 JSON 404，「没醒」是 HTML / 5xx | `app.py` 用 `HTTPException` | `worker.js` 的 `fetchCover()`、`viz()`、`fromStreamer()` |
-| `/api/tracks` 的字段 | `worker.js` 的 `summary()`、`tracksFor()` | `page.html` |
+| `/api/tracks` 的字段 | `worker.js` 的 `summary()`、`tracksFor()`、`hotOrder()` | `page.html` |
+| 拆合唱歌手（`&`、`＆`、`、`、`/`、逗号、` x `、`feat.`） | `worker.js` 的 `artistsOf()`（歌手热门歌按这个名字存） | `page.html` 的 `artistsOf()`（歌手页的名字）；对不上的话那位歌手的歌就不按热门排 |
 | 管理接口 | `worker.js` 的 `adminApi()` | `admin.html`（只用 `state`、`remove`）、`README.md` 的路由表 |
 | 频道主菜单 | `OWNER_COMMANDS`、`OWNER_KEYBOARD`、`OWNER_ALIAS` | 改了必须把 `COMMANDS_VERSION` 加 1，否则频道主那边的菜单不会重设 |
 | 机器人说明 | `HELP`、`PUBLIC_HELP` | 加命令、改用法时同步改 |
