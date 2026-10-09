@@ -322,8 +322,8 @@ async function tracksFor(env) {
 async function trackList(env) {
   const now = Date.now();
   if (!listCache || listCache.exp < now) {
-    const [tracks, playlists] = await Promise.all([tracksFor(env), lib(env).listPlaylists()]);
-    listCache = { body: JSON.stringify({ channel: env.CHANNEL_USERNAME || '', tracks, playlists }), exp: now + LIST_TTL_MS };
+    const [tracks, playlists, hot] = await Promise.all([tracksFor(env), lib(env).listPlaylists(), lib(env).listHot()]);
+    listCache = { body: JSON.stringify({ channel: env.CHANNEL_USERNAME || '', tracks, playlists, hot: hotOrder(tracks, hot) }), exp: now + LIST_TTL_MS };
   }
   return new Response(listCache.body, {
     headers: cors({ 'Content-Type': 'application/json; charset=utf-8', 'Cache-Control': 'public, max-age=15' }),
@@ -483,7 +483,100 @@ async function fillMissing(env) {
       else fails++;
     }
   }
-  return { done, fails, covers: covers.length, lyrics: words.length };
+  // 这一轮没有封面、歌词要补时，才补一位歌手的热门歌（2 个子请求、解析一个 100 多 KB 的 JSON）：
+  // 免费版一次调用只有 50 个子请求、10 毫秒 CPU，别和补封面歌词挤在同一轮
+  let hot = 0;
+  if (!jobs.length) {
+    const L = lib(env);
+    for (const name of await L.missingHot(HOT_BATCH, Date.now())) {
+      try {
+        const songs = await neteaseHot(name);
+        await L.putHot(name, songs, Date.now() + (songs.length ? HOT_REFRESH_MS : HOT_MISS_MS));
+        hot++;
+        listCache = null;
+      } catch {
+        fails++;
+        break;  // 网易云抽风：下一轮再来，什么也不存
+      }
+    }
+  }
+  return { done, fails, covers: covers.length, lyrics: words.length, hot };
+}
+
+// 同步小号时顺手把这几个号的热门 50 首记下来，网页歌手页马上按它排，不用等后台慢慢轮到。
+// 小号记着网易云歌手编号，不用再搜：一个号 1 个子请求。最多 ALT_HOT_MOST 个，其余的交给后台补全；出错就算了，后台会再取
+const ALT_HOT_MOST = 5;
+async function altHot(env, alts) {
+  const L = lib(env);
+  for (const a of alts.filter(x => x.id && x.name).slice(0, ALT_HOT_MOST)) {
+    try {
+      const songs = await neteaseTopSongs(a.id);
+      if (songs.length) await L.putHot(a.name, songs, Date.now() + HOT_REFRESH_MS);
+    } catch {
+      // 网易云抽风：留给后台补全
+    }
+  }
+  listCache = null;
+}
+
+// ── 歌手的热门歌：网易云歌手页的「热门 50 首」。网页的歌手页按它排，不然新搬来的冷门歌全排在前面 ──
+const HOT_BATCH = 1;                  // 每轮最多补几位歌手（一天最多 288 位；歌多的歌手先，常听的头几个小时就有了）
+const HOT_REFRESH_MS = 7 * DAY_MS;    // 热门会变：一周重取一次
+const HOT_MISS_MS = 30 * DAY_MS;      // 网易云上找不到这位歌手：一个月后再试
+
+// 「A&B」「A、B」这样合唱的歌，两位歌手都算（和 page.html 的 artistsOf() 拆法一样，歌手页的名字才对得上）
+function artistsOf(artist) {
+  return String(artist || '').split(/[&＆、/,，]| x | feat\.? /i).map(a => a.trim()).filter(Boolean);
+}
+
+// → 这位歌手的热门歌名，按网易云的顺序；[] = 网易云上没有叫这个名字的歌手。出错（超时、风控）抛异常，下次再试
+async function neteaseHot(name) {
+  const want = norm(name);
+  if (!want) return [];
+  const headers = { 'User-Agent': UA, Referer: 'https://music.163.com/' };
+  const q = new URLSearchParams({ s: name, type: '100', limit: '10', offset: '0' });
+  const j = await getJson(`${NETEASE}/search/get?${q}`, { headers });
+  if (!j || j.code !== 200) throw new Error(`search/get → code ${j && j.code}`);
+  // 名字要完全一样（或者是别名、译名）才算：搜歌手会顺带出名字像的人
+  const a = ((j.result && j.result.artists) || []).find(x =>
+    [x.name, x.trans, ...(x.alias || []), ...(x.transNames || [])].some(n => norm(n) === want));
+  if (!a) return [];
+  return neteaseTopSongs(a.id);
+}
+
+// 网易云歌手编号 → 热门 50 首的歌名（按网易云的顺序）。出错抛异常
+async function neteaseTopSongs(id) {
+  const headers = { 'User-Agent': UA, Referer: 'https://music.163.com/' };
+  const d = await getJson(`${NETEASE}/artist/top/song?id=${encodeURIComponent(id)}`, { headers });
+  if (!d || d.code !== 200) throw new Error(`artist/top/song → code ${d && d.code}`);
+  return (d.songs || []).map(x => String(x.name || '')).filter(Boolean).slice(0, 50);
+}
+
+// 每位歌手：我们库里能对上网易云热门 50 首的歌，按热门的顺序排好的消息号。网页歌手页把这些排最前面，其余照旧（新的在前）。
+// 歌名先比原样，再比去掉「(Live)」「DJ版」之类版本说明的；同一名次原版排在翻版前面
+function hotOrder(tracks, hot) {
+  const by = new Map();
+  for (const t of tracks) {
+    for (const a of artistsOf(t.artist)) {
+      if (!hot[a]) continue;
+      if (!by.has(a)) by.set(a, []);
+      by.get(a).push(t);
+    }
+  }
+  const out = {};
+  for (const [a, songs] of by) {
+    const exact = new Map(), loose = new Map();
+    hot[a].forEach((name, i) => {
+      if (!exact.has(norm(name))) exact.set(norm(name), i);
+      if (!loose.has(norm(cleanTitle(name)))) loose.set(norm(cleanTitle(name)), i);
+    });
+    const hit = songs.map(t => {
+      const e = exact.get(norm(t.title));
+      return { id: t.id, r: e ?? loose.get(norm(cleanTitle(t.title))), loose: e === undefined ? 1 : 0 };
+    }).filter(x => x.r !== undefined).sort((x, y) => x.r - y.r || x.loose - y.loose);
+    if (hit.length) out[a] = hit.map(x => x.id);
+  }
+  return out;
 }
 
 // 网易云上这首歌的专辑封面（500×500）→ { mime, data }；没找到 → null；网易云出错就抛。
@@ -1014,6 +1107,8 @@ export class Library extends DurableObject {
       this.sql.exec('CREATE TABLE IF NOT EXISTS viz (id INTEGER PRIMARY KEY, data TEXT NOT NULL)');
       // 听众求歌的记录（限次用）
       this.sql.exec('CREATE TABLE IF NOT EXISTS asks (uid INTEGER NOT NULL, at INTEGER NOT NULL)');
+      // 歌手在网易云的热门歌（歌手页排序用）：songs 是歌名 JSON 数组（[] = 网易云上没这位歌手），过了 retry_at 重取
+      this.sql.exec('CREATE TABLE IF NOT EXISTS artist_hot (name TEXT PRIMARY KEY, songs TEXT NOT NULL, retry_at INTEGER NOT NULL)');
       this.dropSplitterLeftovers();
       const coversV = this.cfg('coversV');
       // 以前没封面的歌记成了「没有」；现在改用频道图片，清掉这些记号让它们重新配图
@@ -1071,6 +1166,36 @@ export class Library extends DurableObject {
 
   changed() {
     this.tracks = null;
+  }
+
+  // 歌手热门歌整张表（几百行）读一次记在内存里，每次打开网页、每轮定时任务都不再读库
+  hotRows() {
+    if (!this.hot) {
+      this.hot = new Map(this.sql.exec('SELECT name, songs, retry_at FROM artist_hot').toArray()
+        .map(r => [r.name, { songs: JSON.parse(r.songs), retryAt: r.retry_at }]));
+    }
+    return this.hot;
+  }
+
+  // { 歌手: [热门歌名…] }，只给取到了的
+  async listHot() {
+    const out = {};
+    for (const [name, h] of this.hotRows()) if (h.songs.length) out[name] = h.songs;
+    return out;
+  }
+
+  // 该去网易云取热门歌的歌手：还没取过的、到了该重取的。歌多的歌手先
+  async missingHot(n, now) {
+    const rows = this.hotRows(), count = new Map();
+    for (const t of await this.listTracks()) for (const a of artistsOf(t.artist)) count.set(a, (count.get(a) || 0) + 1);
+    return [...count].filter(([a]) => !rows.has(a) || rows.get(a).retryAt <= now)
+      .sort((x, y) => y[1] - x[1]).slice(0, n).map(([a]) => a);
+  }
+
+  async putHot(name, songs, retryAt) {
+    this.sql.exec(`INSERT INTO artist_hot (name, songs, retry_at) VALUES (?, ?, ?)
+      ON CONFLICT(name) DO UPDATE SET songs = excluded.songs, retry_at = excluded.retry_at`, name, JSON.stringify(songs), retryAt);
+    this.hotRows().set(name, { songs, retryAt });
   }
 
   // 歌单里有没有同一首歌（按整理后的歌名、歌手比，时长相差 3 秒以内；时长不知道的也算）
@@ -1851,6 +1976,7 @@ async function syncAlts(env, chat, alts) {
   } catch {
     r = { status: 0, data: {} };
   }
+  await altHot(env, alts);
   const names = alts.map(a => a.name || a.id).join('、');
   if (r.status === 200) {
     return say(env, chat, `开始同步小号「${names}」：每个号看热门前 50 首，库里没有的直接发进${h.channel ? `测试频道 @${h.channel}` : '频道'}，不用审核，发完告诉你。`);

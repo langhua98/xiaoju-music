@@ -66,6 +66,8 @@ const mode = { getFile: 'ok', expireOnce: false, streamer: 'ok', thumbs: 'ok', l
 const lrclibDb = [];
 const neteaseDb = [];
 const neteaseLyrics = new Map();
+// 网易云的歌手（搜歌手、歌手页的热门 50 首）：{ id, name, alias, hot: [歌名…] }
+const neteaseArtists = [];
 const nn = s => String(s || '').toLowerCase().replace(/[^\p{L}\p{N}]+/gu, '');
 const DAY = 24 * 3600 * 1000;
 // 每句隔 4 秒：[00:01.50]、[00:05.50]……
@@ -136,6 +138,19 @@ globalThis.fetch = async (input, init = {}) => {
     assert.equal(headers.get('Referer'), 'https://music.163.com/');
     const q = nn(new URLSearchParams(init.body).get('s'));
     return Response.json({ code: 200, result: { songs: neteaseDb.filter(x => q.includes(nn(x.name.replace(/\s*[(（].*$/, '')))) } });
+  }
+  if (url.startsWith('https://music.163.com/api/search/get?')) {
+    if (mode.netease === 'down') throw new TypeError('fetch failed');
+    assert.equal(headers.get('Referer'), 'https://music.163.com/');
+    const p = new URL(url).searchParams;
+    assert.equal(p.get('type'), '100');
+    const q = nn(p.get('s'));
+    return Response.json({ code: 200, result: { artists: neteaseArtists.filter(a => nn(a.name).includes(q) || q.includes(nn(a.name)))
+      .map(a => ({ id: a.id, name: a.name, alias: a.alias || [] })) } });
+  }
+  if ((m = url.match(/^https:\/\/music\.163\.com\/api\/artist\/top\/song\?id=(\d+)$/))) {
+    const a = neteaseArtists.find(x => x.id === Number(m[1])) || { hot: [] };
+    return Response.json({ code: 200, more: true, songs: a.hot.map((name, i) => ({ id: 1000 + i, name })) });
   }
   if ((m = url.match(/^https:\/\/music\.163\.com\/api\/song\/lyric\?id=(\d+)&/))) {
     return Response.json({ code: 200, lrc: { version: 1, lyric: neteaseLyrics.get(Number(m[1])) || '' } });
@@ -251,7 +266,7 @@ await t('切片那一版的数据库：歌搬进 songs，状态列、chats 表�
   const old = await makeLibrary({ TRACKS: makeKV(oldTracks) }, db);
   assert.deepEqual((await old.listTracks()).map(x => x.id), [51, 7]); // 没有再从 KV 搬 4 和 12
   const tables = db.prepare("SELECT name FROM sqlite_master WHERE type = 'table' ORDER BY name").all().map(r => r.name);
-  assert.deepEqual(tables, ['asks', 'config', 'covers', 'logo_covers', 'lyrics', 'photos', 'playlists', 'songs', 'viz']);
+  assert.deepEqual(tables, ['artist_hot', 'asks', 'config', 'covers', 'logo_covers', 'lyrics', 'photos', 'playlists', 'songs', 'viz']);
   assert.deepEqual(db.prepare('SELECT k FROM config ORDER BY k').all().map(r => r.k), ['coversV', 'migrated']);
   await makeLibrary({}, db); // 再启动一次：什么都不用做，也不报错
   assert.equal((await old.getTrack(7)).title, '旧版里的歌');
@@ -931,6 +946,7 @@ await t('贴网址搬运：搬运设置可以开关网站和授权、改数量�
   bot.harvestBusy = null;
   // 主页（歌手主页、音乐人的用户主页）：记成小号，马上同步，新歌不审核直接发
   bot.describe = { site: '网易云音乐 music.163.com', kind: 'artist', name: '小橘', id: '9' };
+  neteaseArtists.push({ id: 9, name: '小橘', hot: ['小橘最火的歌', '第二火的'] });
   await dm(OWNER, '搬运频道 正式');
   const before = bot.toStreamer.length;
   await dm(OWNER, 'https://music.163.com/#/user/home?id=77 5');
@@ -943,6 +959,7 @@ await t('贴网址搬运：搬运设置可以开关网站和授权、改数量�
   const told = bot.out.filter(o => o.method === 'sendMessage').slice(-2).map(o => o.text);
   assert.match(told[0], /加了小号「小橘」（第 1 个）。以后它热门前 50 首里库里没有的，不用审核，直接发进频道/);
   assert.match(told[1], /开始同步小号「小橘」：每个号看热门前 50 首，库里没有的直接发进频道，不用审核/);
+  assert.deepEqual((await lib.listHot())['小橘'], ['小橘最火的歌', '第二火的'], '同步小号时马上记下热门 50 首，歌手页不用等后台');
   await dm(OWNER, 'https://music.163.com/artist?id=9');
   assert.match(bot.out.filter(o => o.method === 'sendMessage').at(-2).text, /已经是小号了/);
   assert.equal(JSON.parse(await lib.getConfig('neteaseAlts')).length, 1, '同一个号不加两次');
@@ -1222,6 +1239,30 @@ await t('封面、歌词补全：没自带封面先用网易云的专辑封面�
   assert.match(lastSay().text, /封面：专辑图 \d+ 首，频道图片 \d+ 首，没有 \d+ 首/);
   assert.match(lastSay().text, /歌词：带时间轴 \d+ 首，只有文字 \d+ 首，没有 \d+ 首/);
   for (const id of [921, 922, 923, 924]) await admin('remove', { track: id });
+});
+
+await t('歌手页按网易云热门 50 首排：后台取歌手的热门歌，/api/tracks 带上排好的消息号', async () => {
+  const lib = env.LIB.get(env.LIB.idFromName('library'));
+  const noThumb = (id, extra) => audioPost(id, { file_id: addFile(bytesOf(10, id)), file_size: 10, ...extra });
+  // 新的在前：冷门歌是最新发的，热门歌是老帖
+  await hook({ channel_post: noThumb(931, { title: '热门第二', performer: '星火乐队', duration: 200 }) });
+  await hook({ channel_post: noThumb(932, { title: '热门第一 (Live)', performer: '星火乐队', duration: 200 }) });
+  await hook({ channel_post: noThumb(933, { title: '热门第一', performer: '星火乐队&路人甲', duration: 201 }) });
+  await hook({ channel_post: noThumb(934, { title: '冷门歌', performer: '星火乐队', duration: 200 }) });
+  neteaseArtists.push({ id: 31, name: '星火乐队', hot: ['热门第一', '没搬的歌', '热门第二'] },
+    { id: 32, name: '星火乐队二队', hot: ['冷门歌'] });  // 名字像但不是同一位：不能算
+  const runs = [];
+  const tick = async () => { await worker.scheduled({ cron: '*/5 * * * *' }, env, { waitUntil: p => runs.push(p) }); await Promise.all(runs.splice(0)); };
+  for (let i = 0; i < 60 && !(await lib.listHot())['星火乐队']; i++) await tick();
+  const hot = await lib.listHot();
+  assert.deepEqual(hot['星火乐队'], ['热门第一', '没搬的歌', '热门第二'], '后台取到了热门歌');
+  assert.equal(hot['路人甲'], undefined, '网易云上没有的歌手不给');
+  for (let i = 0; i < 60 && (await lib.missingHot(5, Date.now())).length; i++) await tick();
+  assert.deepEqual(await lib.missingHot(5, Date.now()), [], '都取过了，一周内不再取');
+  const d = await jsonOf(await req('/api/tracks'));
+  assert.deepEqual(d.hot['星火乐队'], [933, 932, 931], '按热门的顺序；同一首原版在 Live 前面；冷门歌不在里面（网页排在热门后面）');
+  assert.equal(d.hot['路人甲'], undefined);
+  for (const id of [931, 932, 933, 934]) await admin('remove', { track: id });
 });
 
 await t('路由：404、405、CORS 预检', async () => {
