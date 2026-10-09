@@ -1364,7 +1364,7 @@ await t('数据库挂了（额度用完）：网页从 KV 快照照样能打开�
     assert.equal((await a.arrayBuffer()).byteLength, 10);
     const c = await req('/c/951');
     assert.equal(c.status, 500, '封面不进快照：网页画文字封面');
-    assert.match(await textOf(c), /数据库：Exceeded allowed rows read/, '500 里带上数据库的报错原文，不开日志也知道原因');
+    assert.match(await textOf(c), /（Error: Exceeded allowed rows read/, '500 里带上报错原文，不开日志也知道原因');
     bot.out.length = 0;
     await dm(FAN, '晴天');
     assert.match(lastSay().text, /数据库今天的免费额度用完了/);
