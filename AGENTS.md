@@ -147,6 +147,7 @@
 | `GET /copy/status`、`POST /copy/stop`、`GET /harvest/status`、`GET /harvest/options` | 手动查看、维护用 | 看搬歌、抓歌进度（部署流式服务前用来确认没活在跑），停止搬歌 |
 | `POST /fulfill`、`GET /search/global` | Worker | 听众求歌、频道主「搜」 |
 | `POST /harvest`、`/harvest/describe`、`/harvest/count`、`/harvest/alts`、`/harvest/review`、`GET /harvest/review/<id>` | Worker | 贴网址 / 爬关键词 / 小号 |
+| `POST /harvest/playlist` | Worker（频道主贴歌单链接时） | 网易云歌单的名字、封面、简介、歌（带着登录的账号取，私密歌单也行）；不下载 |
 | `GET /harvest/grey` | Worker（每小时、「进度」「灰色歌」时） | 灰色歌：发歌时网站上没有音源（`NoSource`）的只记信息，在内存里等 Worker 取 |
 | `POST /netease/login`、`/netease/check`、`GET /netease/session` | Worker | 网易云扫码登录、自检、Worker 取 cookie |
 | `GET /search/channels`、`/search/music`、`POST /channels/join`、`/channels/archive-music`、`/channels/check`、`/bot/ask`、`/copy/photos` | 手动维护用 | 找来源频道、加入频道、转图片帖等 |
@@ -163,7 +164,7 @@
 | `photos` | 频道图片帖：`id`、`file_id`（空 = 流式服务扫出来的老帖） |
 | `lyrics` | `id`、`src`（`lrclib`/`netease`/`manual`/`none`）、`lrc`、`retry_at`（0 = 不用再找） |
 | `viz` | `id`、`data`（base64；空字符串 = 确定算不了） |
-| `playlists` | `id`、`pos`、`name`、`cover`、`tracks`（消息号 JSON 数组） |
+| `playlists` | `id`、`pos`、`name`、`cover`、`tracks`（消息号 JSON 数组）；照着网易云歌单建的还有 `pic`（封面地址）、`intro`、`src`（网易云歌单编号）、`wanted`（网易云里的歌 JSON，按顺序；这种歌单的歌由 `resolvePlaylists()` 每次现对，`tracks` 不用） |
 | `asks` | 听众求歌记录 `uid`、`at`（每人 24 小时 10 次） |
 | `grey` | 灰色歌（网易云上没有音源、只记了信息）：`sid`（网易云歌曲编号）、`info`（JSON，字段见 `cleanGrey()`）、`at`。整张表记在 DO 内存里 |
 | `artist_hot` | 歌手在网易云的热门 50 首：`name`（我们这边的歌手名）、`songs`（歌名 JSON 数组，`[]` = 网易云上没这位）、`retry_at`（过了就重取）、`pic`（网易云歌手照片地址，后来加的列）。整张表记在 DO 内存里 |
@@ -202,7 +203,7 @@ node test.mjs
 ```
 
 - 要 **Node 22**（CI 也用 22）。用到 `node:sqlite` 的 `DatabaseSync` 模拟 DO，用 `module.register` 加载 `test/hooks.mjs`。不用 `npm install`。
-- 通过时最后一行是 `全部 N 项通过`（写这份文件时 N = 45）。任何一项失败，脚本会抛异常、退出码非 0。
+- 通过时最后一行是 `全部 N 项通过`（写这份文件时 N = 46）。任何一项失败，脚本会抛异常、退出码非 0。
 - 测试是**一个脚本从上到下顺序跑**，各项共用同一个 `env` 和数据库，前面的状态会带到后面。加测试用 `await t('说明', async () => { … })`，放在相关的那几项附近，结束前把自己加的歌删掉（参考现有用例最后的 `admin('remove', …)`）。
 - 外部请求都由 `globalThis.fetch` 的替身处理；**没被模拟的网址会抛 `unexpected fetch`**。加了新的外部请求，就在替身里加对应分支。
 - 常用的帮手：`req(path, init)` 请求 Worker；`hook(update)` 模拟 webhook；`admin(action, payload)` 调管理接口；`dm(uid, 文字)` 模拟私聊机器人；`lastSay()` 看机器人最后发的话；`bot.*`、`mode.*` 控制模拟服务的行为。
@@ -219,7 +220,7 @@ pip install -r requirements.txt pytest httpx
 python -m pytest -q
 ```
 
-- 写这份文件时是 `57 passed`（线上镜像是 Python 3.12；本地用 3.13 也能过）。
+- 写这份文件时是 `58 passed`（线上镜像是 Python 3.12；本地用 3.13 也能过）。
 - 测试**不需要 ffmpeg**（`decode_pcm`、`convert`、`measure` 都换成了假的）；线上镜像里装了 ffmpeg。
 - 可测的写法：`Streamer`、`Copier`、`Harvester`、`publish()` 都把「取消息、下载、发帖、发消息、sleep」做成参数传进去，测试传假的。新功能照这个路子写，不要在逻辑里直接用全局的 Telegram 客户端。
 - 测 HTTP 接口用 `fastapi.testclient.TestClient` 配合 `monkeypatch` 替换 `app` 模块里的全局对象（参考 `test_harvest_endpoints`）。

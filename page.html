@@ -184,6 +184,11 @@ h1{font-size:20px;margin:0;line-height:1.2}
   box-shadow:0 10px 26px rgba(0,0,0,.28),inset 0 1px 0 rgba(255,255,255,.15)}
 .card-face::after{content:"";position:absolute;inset:0;background:linear-gradient(180deg,transparent 40%,rgba(0,0,0,.32));pointer-events:none}
 .stack{position:absolute;inset:0}
+/* 照着网易云歌单建的：封面大图铺满，名字压在下面的暗角上 */
+.card-pic{position:absolute;inset:0;width:100%;height:100%;object-fit:cover;opacity:0;transition:opacity .3s}
+.card-pic.ready{opacity:1}
+.card-face.pic::after{background:linear-gradient(180deg,transparent 35%,rgba(0,0,0,.62))}
+.artist-head .who .intro{display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden;white-space:normal;margin-top:2px}
 .stack img{position:absolute;top:10%;width:40%;aspect-ratio:1;object-fit:cover;border-radius:9px;box-shadow:0 6px 16px rgba(0,0,0,.38)}
 .stack .s0{right:8%;transform:rotate(7deg);z-index:3}
 .stack .s1{right:23%;transform:rotate(-3deg) translateY(5%);z-index:2}
@@ -651,7 +656,7 @@ h1{font-size:20px;margin:0;line-height:1.2}
   var playlists = [];
   function playlistIndex(){
     return playlists.map(function(p){
-      return { key: p.id, name: p.name, songs: p.tracks.map(function(id){ return byId[id]; }).filter(Boolean), cover: p.cover };
+      return { key: p.id, name: p.name, songs: p.tracks.map(function(id){ return byId[id]; }).filter(Boolean), cover: p.cover, pic: p.pic, intro: p.intro };
     }).filter(function(g){ return g.songs.length; });
   }
 
@@ -771,6 +776,16 @@ h1{font-size:20px;margin:0;line-height:1.2}
     face.style.background = 'linear-gradient(150deg, hsl(' + h + ' 66% 47%), hsl(' + (h + 30) % 360 + ' 72% 21%))';
     var stack = el('span', 'stack');
     face.appendChild(stack);
+    if(g.pic){ // 网易云歌单的封面：直接从网易云图片服务器取（不带 Referer，不然被防盗链挡），取不到就照旧叠专辑小图
+      var pic = el('img', 'card-pic');
+      pic.alt = '';
+      pic.loading = 'lazy';
+      pic.referrerPolicy = 'no-referrer';
+      pic.onload = function(){ pic.classList.add('ready'); face.classList.add('pic'); };
+      pic.onerror = function(){ pic.remove(); fillStack(stack, g.songs); };
+      pic.src = g.pic + '?param=400y400';
+      face.appendChild(pic);
+    }
     face.appendChild(el('span', 'card-name' + (Array.from(g.name).length > 5 ? ' long' : ''), g.name));
     face.appendChild(el('span', 'card-n', g.songs.length + ' 首'));
     face.addEventListener('click', function(){ openGroup('list', g.key); });
@@ -781,7 +796,7 @@ h1{font-size:20px;margin:0;line-height:1.2}
     play.addEventListener('click', function(e){ e.stopPropagation(); playGroup('list', g); });
     li.appendChild(face);
     li.appendChild(play);
-    fillStack(stack, g.songs);
+    if(!g.pic) fillStack(stack, g.songs);
     return li;
   }
   var usedArt = {}; // 这一屏歌单卡片已经用过的专辑图：同一首歌的图不在两张卡片上重复出现
@@ -832,10 +847,21 @@ h1{font-size:20px;margin:0;line-height:1.2}
     if(kind === 'artist'){
       th = el('span', 'thumb round');
       avatar(g, th);
+    } else if(g.pic){ // 网易云歌单的封面
+      th = el('span', 'thumb');
+      var img = el('img');
+      img.alt = '';
+      img.referrerPolicy = 'no-referrer';
+      img.onload = function(){ img.classList.add('ready'); };
+      img.onerror = function(){ th.remove(); };
+      img.src = g.pic + '?param=200y200';
+      th.appendChild(img);
     }
     var who = el('div', 'who');
     who.appendChild(el('b', null, g.name));
-    who.appendChild(el('span', null, g.songs.length + ' 首'));
+    var nGrey = g.songs.filter(function(t){ return t.grey; }).length;
+    who.appendChild(el('span', null, (g.songs.length - nGrey) + ' 首' + (nGrey ? '（另有 ' + nGrey + ' 首暂无音源）' : '')));
+    if(g.intro) who.appendChild(el('span', 'intro', g.intro));
     var all = el('button', 'playall');
     all.type = 'button';
     all.innerHTML = '<svg class="ic"><use href="#i-play"/></svg>播放全部';
@@ -1787,16 +1813,19 @@ h1{font-size:20px;margin:0;line-height:1.2}
     }).then(function(d){
       // 灰色歌（网易云上没有音源、只记了信息）接在最后：灰色、不能播、不能收藏。消息号用负的网易云编号，和频道的歌分开
       var nReal = (d.tracks || []).length;
-      tracks = (d.tracks || []).concat((d.grey || []).map(function(g){
-        return { id: -Number(g.sid), title: g.title, artist: g.artist, duration: g.duration, playable: false, art: 0,
+      // 只在网易云歌单里出现的灰色（pl）不进「全部」和歌手页，只放进 byId 给歌单用
+      var greys = (d.grey || []).map(function(g){
+        return { id: -Number(g.sid), title: g.title, artist: g.artist, duration: g.duration, playable: false, art: 0, pl: g.pl,
           grey: [g.why, g.album && '《' + g.album + '》', g.year].filter(Boolean).join(' · ') };
-      }));
+      });
+      tracks = (d.tracks || []).concat(greys.filter(function(t){ return !t.pl; }));
       playlists = d.playlists || [];
       hotIds = d.hot || {};
       artistPics = d.pics || {};
       artistCache = null;
       byId = {};
       tracks.forEach(function(t){ byId[t.id] = t; if(t.art === 0) seen[t.id] = false; }); // 确定没专辑图的直接画文字封面
+      greys.forEach(function(t){ if(t.pl){ byId[t.id] = t; seen[t.id] = false; } });
       loaded = true;
       $('nAll').textContent = nReal ? String(nReal) : '';
       // 分享链接 #消息号 优先，其次上次听的；只选中不自动出声（浏览器也不允许）

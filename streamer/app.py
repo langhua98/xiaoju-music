@@ -847,6 +847,20 @@ async def harvest_alts(request: Request):
         raise HTTPException(409, {'busy': harvester.busy_text()})
     return {'ok': True}
 
+@app.post('/harvest/playlist')
+async def harvest_playlist(request: Request):
+    """{url, cookie} → {id, name, cover, intro, songs: [{sid, title, artist, duration}]}：频道主贴了网易云歌单，
+    Worker 照着它在网页上建一个同名歌单（只记信息，不下载；库里没有的歌照旧走审核单）。不是歌单 → 400"""
+    check_key(request)
+    body = await request.json()
+    url = str(body.get('url') or '').strip()
+    if not re.match(r'^https?://', url) or not NetEase().match(url):
+        raise HTTPException(400, '不是网易云的网址')
+    try:
+        return await NetEase().playlist(url, Http(gap=0.2), str(body.get('cookie') or ''))
+    except ValueError as e:
+        raise HTTPException(400, str(e))
+
 @app.post('/harvest/count')
 async def harvest_count(request: Request):
     """{url, settings, existing} → {site, kind, name, total, have}：抓之前先数一数（不出审核单）。网址不支持 → 400"""
