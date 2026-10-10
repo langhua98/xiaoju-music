@@ -1683,14 +1683,19 @@ export class Library extends DurableObject {
 
   async addPhoto(id, fileId) {
     this.sql.exec('INSERT INTO photos (id, file_id) VALUES (?, ?) ON CONFLICT(id) DO UPDATE SET file_id = excluded.file_id', id, fileId || '');
+    this.photos = null;
   }
 
   async addScannedPhotos(ids) {
     for (const id of ids) this.sql.exec('INSERT OR IGNORE INTO photos (id, file_id) VALUES (?, ?)', id, '');
+    this.photos = null;
   }
 
+  // 频道图片整张表读一次就记在内存里：没专辑图的歌配封面时要从里面随机挑一张，配不成（流式服务没醒）就不存、下次再来，
+  // 以前每次都整表读，歌手页一打开几百个头像同时要封面，会很快用光免费版每天的读取额度
   async listPhotos() {
-    return this.sql.exec('SELECT id, file_id FROM photos').toArray();
+    if (!this.photos) this.photos = this.sql.exec('SELECT id, file_id FROM photos ORDER BY id').toArray();
+    return this.photos;
   }
 
   async maxTrackId() {
