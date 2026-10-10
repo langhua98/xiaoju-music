@@ -143,6 +143,12 @@ export default {
 
 // 没预料到的错：把错误类型和说明带在 500 里（这个 Worker 没开日志保存，线上出事时不用等 wrangler tail 也能看出原因）。
 // 说明里可能带地址：密钥（机器人 token、各种 key）一律换成 ***，Telegram 的 bot<token> 也抹掉
+function hotBucket(name) {
+  let h = 0;
+  for (const ch of String(name)) h = (h * 31 + ch.codePointAt(0)) % 1000003;
+  return h % HOT_BUCKETS;
+}
+
 function errorWhy(e, env) {
   let msg = `${(e && e.name) || 'Error'}: ${String((e && e.message) || e)}`;
   for (const k of ['TG_BOT_TOKEN', 'TG_WEBHOOK_SECRET', 'ADMIN_KEY', 'STREAMER_KEY']) {
@@ -1300,6 +1306,14 @@ function contentDisposition(rec, download) {
 
 // ── 数据：Durable Object「Library」────────────────────────────────
 
+// memo 表（分桶缓存）：DO 闲一两分钟就休眠，醒来时内存里的歌表、热门歌、频道图片都没了。以前每次醒来都把原表整张读一遍
+// （歌表连封面表 6000 多行），访问零散时一天醒几百次，就把免费版每天 500 万行的读取额度用光了。
+// 现在整理好的结果分成几个「桶」存在 memo 表，醒来读几行桶就回来；改一首只重写它那一桶。
+// 存的格式（summary() 的字段、trackRow 的样子、热门歌的结构）变了就把 MEMO_V 加 1，老的桶自动作废、重建一次
+const MEMO_V = '1';
+const TRACK_BUCKET = 500;  // 歌表按消息号每 500 首一桶
+const HOT_BUCKETS = 16;    // 热门歌按歌手名分 16 桶
+
 export class Library extends DurableObject {
 
 
@@ -1327,6 +1341,8 @@ export class Library extends DurableObject {
       this.sql.exec('CREATE TABLE IF NOT EXISTS viz (id INTEGER PRIMARY KEY, data TEXT NOT NULL)');
       // 听众求歌的记录（限次用）
       this.sql.exec('CREATE TABLE IF NOT EXISTS asks (uid INTEGER NOT NULL, at INTEGER NOT NULL)');
+      // 分桶缓存（见 MEMO_V 上面的说明）：k 是「名字|v」（版本）或「名字|b|桶号」，v 是这一桶的 JSON
+      this.sql.exec('CREATE TABLE IF NOT EXISTS memo (k TEXT PRIMARY KEY, v TEXT NOT NULL)');
       // 歌手在网易云的热门歌（歌手页排序用）：songs 是歌名 JSON 数组（[] = 网易云上没这位歌手），过了 retry_at 重取
       this.sql.exec('CREATE TABLE IF NOT EXISTS artist_hot (name TEXT PRIMARY KEY, songs TEXT NOT NULL, retry_at INTEGER NOT NULL)');
       // 灰色歌：网易云上没有音源、只记了信息的歌。sid 是网易云歌曲编号，info 是 JSON（见 worker 的 cleanGrey）
@@ -1355,6 +1371,7 @@ export class Library extends DurableObject {
       // 语音、确定没缩略图的 → 频道图片；有缩略图 file_id 的 → 自带；更早登记、说不清的删掉，下次请求时重新判断
       if (!this.sql.exec('PRAGMA table_info(covers)').toArray().some(r => r.name === 'own')) {
         this.sql.exec('ALTER TABLE covers ADD COLUMN own INTEGER NOT NULL DEFAULT 1');
+        this.memoDrop('tracks');
         for (const r of this.sql.exec("SELECT s.id, s.rec FROM songs s JOIN covers c ON c.id = s.id WHERE c.mime != 'none'").toArray()) {
           const rec = JSON.parse(r.rec);
           if (rec.kind === 'voice' || rec.thumb === '') this.sql.exec('UPDATE covers SET own = 0 WHERE id = ?', r.id);
@@ -1386,12 +1403,51 @@ export class Library extends DurableObject {
   // 整张表读一遍是「歌数 × 2」行，每次打开网页都读会用掉免费版每天的读取额度：结果记在内存里，
   // songs、covers 一改（changed()）就作废
   async listTracks() {
-    if (!this.tracks) {
-      this.recs = new Map();
-      this.tracks = this.sql.exec('SELECT s.rec, c.mime, c.own FROM songs s LEFT JOIN covers c ON c.id = s.id ORDER BY s.id DESC').toArray()
-        .map(r => this.trackRow(r));
-    }
+    this.ensureTracks();
     return this.tracks;
+  }
+
+  // 歌表进内存：先读 memo 的桶（几行），没有（第一次、格式变了、批量改过）才整表读一遍并存成桶
+  ensureTracks() {
+    if (this.tracks) return;
+    this.recs = new Map();
+    const buckets = this.memoRead('tracks');
+    if (buckets) {
+      this.tracks = buckets.flat().sort((a, b) => b[0].id - a[0].id).map(([t, r]) => { this.recs.set(t.id, r); return t; });
+      return;
+    }
+    this.tracks = this.sql.exec('SELECT s.rec, c.mime, c.own FROM songs s LEFT JOIN covers c ON c.id = s.id ORDER BY s.id DESC').toArray()
+      .map(r => this.trackRow(r));
+    const by = new Map();
+    for (const t of this.tracks) {
+      const b = Math.floor(t.id / TRACK_BUCKET);
+      if (!by.has(b)) by.set(b, []);
+      by.get(b).push([t, this.recs.get(t.id)]);
+    }
+    this.memoWrite('tracks', by);
+  }
+
+  // ── memo 表的读写 ──
+  memoRead(name) {
+    const rows = this.sql.exec('SELECT k, v FROM memo WHERE k > ? AND k < ?', name + '|', name + '|~').toArray();
+    const ver = rows.find(r => r.k === name + '|v');
+    if (!ver || ver.v !== MEMO_V) return null;
+    return rows.filter(r => r.k.startsWith(name + '|b|')).map(r => JSON.parse(r.v));
+  }
+
+  memoWrite(name, buckets) {
+    this.memoDrop(name);
+    for (const [b, arr] of buckets) this.sql.exec('INSERT INTO memo (k, v) VALUES (?, ?)', `${name}|b|${b}`, JSON.stringify(arr));
+    this.sql.exec('INSERT INTO memo (k, v) VALUES (?, ?)', name + '|v', MEMO_V);
+  }
+
+  memoPut(name, b, arr) {
+    if (arr.length) this.sql.exec('INSERT INTO memo (k, v) VALUES (?, ?) ON CONFLICT(k) DO UPDATE SET v = excluded.v', `${name}|b|${b}`, JSON.stringify(arr));
+    else this.sql.exec('DELETE FROM memo WHERE k = ?', `${name}|b|${b}`);
+  }
+
+  memoDrop(name) {
+    this.sql.exec('DELETE FROM memo WHERE k > ? AND k < ?', name + '|', name + '|~');
   }
 
   // 一行 songs（连着 covers）→ 网页要的那首；顺带记下放歌要的文件信息（快照用，见 saveSnapshot）
@@ -1406,18 +1462,20 @@ export class Library extends DurableObject {
 
   // 快照用：{ 消息号: 放歌要的文件信息 }。和 listTracks 是同一次读，不多读
   async listRecs() {
-    await this.listTracks();
+    this.ensureTracks();
     return Object.fromEntries(this.recs);
   }
 
+  // 批量改了 songs、covers：内存和 memo 里的歌表都作废，下次整表读一遍
   changed() {
     this.tracks = null;
+    this.memoDrop('tracks');
   }
 
   // 只改了一首：歌表在内存里就只重读这一首（一两行），不把整张表作废。同步小号一口气发几十首时，
   // 每发一首都整表重读（几千行）会很快用光免费版每天的读取额度
   touched(id) {
-    if (!this.tracks) return;
+    this.ensureTracks();  // 不在内存里也要先读回来（读桶，几行），不然 memo 里那一桶就旧了
     const r = this.sql.exec('SELECT s.rec, c.mime, c.own FROM songs s LEFT JOIN covers c ON c.id = s.id WHERE s.id = ?', id).toArray()[0];
     const list = this.tracks.filter(t => t.id !== id);
     this.recs.delete(id);
@@ -1426,13 +1484,26 @@ export class Library extends DurableObject {
       if (at < 0) list.push(t); else list.splice(at, 0, t);
     }
     this.tracks = list;
+    const b = Math.floor(id / TRACK_BUCKET);
+    this.memoPut('tracks', b, list.filter(t => Math.floor(t.id / TRACK_BUCKET) === b).map(t => [t, this.recs.get(t.id)]));
   }
 
   // 歌手热门歌整张表（几百行）读一次记在内存里，每次打开网页、每轮定时任务都不再读库
   hotRows() {
     if (!this.hot) {
-      this.hot = new Map(this.sql.exec('SELECT name, songs, retry_at, pic FROM artist_hot').toArray()
-        .map(r => [r.name, { songs: JSON.parse(r.songs), retryAt: r.retry_at, pic: r.pic }]));
+      const buckets = this.memoRead('hot');
+      if (buckets) this.hot = new Map(buckets.flat());
+      else {
+        this.hot = new Map(this.sql.exec('SELECT name, songs, retry_at, pic FROM artist_hot').toArray()
+          .map(r => [r.name, { songs: JSON.parse(r.songs), retryAt: r.retry_at, pic: r.pic }]));
+        const by = new Map();
+        for (const e of this.hot) {
+          const b = hotBucket(e[0]);
+          if (!by.has(b)) by.set(b, []);
+          by.get(b).push(e);
+        }
+        this.memoWrite('hot', by);
+      }
     }
     return this.hot;
   }
@@ -1460,7 +1531,16 @@ export class Library extends DurableObject {
 
   // 灰色歌整张表（几百上千行）读一次记在内存里
   async listGrey() {
-    if (!this.greyList) this.greyList = this.sql.exec('SELECT info FROM grey ORDER BY at DESC').toArray().map(r => JSON.parse(r.info));
+    if (!this.greyList) {
+      const buckets = this.memoRead('grey');
+      if (buckets) this.greyList = buckets.flat();
+      else {
+        this.greyList = this.sql.exec('SELECT info FROM grey ORDER BY at DESC').toArray().map(r => JSON.parse(r.info));
+        const by = new Map();
+        this.greyList.forEach((g, i) => { const b = Math.floor(i / 500); if (!by.has(b)) by.set(b, []); by.get(b).push(g); });
+        this.memoWrite('grey', by);
+      }
+    }
     return this.greyList;
   }
 
@@ -1474,7 +1554,7 @@ export class Library extends DurableObject {
       this.sql.exec(`INSERT INTO grey (sid, info, at) VALUES (?, ?, ?)
         ON CONFLICT(sid) DO UPDATE SET info = excluded.info`, g.sid, JSON.stringify(g), Date.now());
     }
-    if (list.length) this.greyList = null;
+    if (list.length) { this.greyList = null; this.memoDrop('grey'); }
     return fresh;
   }
 
@@ -1485,6 +1565,8 @@ export class Library extends DurableObject {
     this.sql.exec(`INSERT INTO artist_hot (name, songs, retry_at, pic) VALUES (?, ?, ?, ?)
       ON CONFLICT(name) DO UPDATE SET songs = excluded.songs, retry_at = excluded.retry_at, pic = excluded.pic`, name, JSON.stringify(songs), retryAt, pic);
     rows.set(name, { songs, retryAt, pic });
+    const b = hotBucket(name);
+    this.memoPut('hot', b, [...rows].filter(e => hotBucket(e[0]) === b));
   }
 
   // 歌单里有没有同一首歌（按整理后的歌名、歌手比，时长相差 3 秒以内；时长不知道的也算）
@@ -1728,17 +1810,28 @@ export class Library extends DurableObject {
   async addPhoto(id, fileId) {
     this.sql.exec('INSERT INTO photos (id, file_id) VALUES (?, ?) ON CONFLICT(id) DO UPDATE SET file_id = excluded.file_id', id, fileId || '');
     this.photos = null;
+    this.memoDrop('photos');
   }
 
   async addScannedPhotos(ids) {
     for (const id of ids) this.sql.exec('INSERT OR IGNORE INTO photos (id, file_id) VALUES (?, ?)', id, '');
     this.photos = null;
+    this.memoDrop('photos');
   }
 
   // 频道图片整张表读一次就记在内存里：没专辑图的歌配封面时要从里面随机挑一张，配不成（流式服务没醒）就不存、下次再来，
   // 以前每次都整表读，歌手页一打开几百个头像同时要封面，会很快用光免费版每天的读取额度
   async listPhotos() {
-    if (!this.photos) this.photos = this.sql.exec('SELECT id, file_id FROM photos ORDER BY id').toArray();
+    if (!this.photos) {
+      const buckets = this.memoRead('photos');
+      if (buckets) this.photos = buckets.flat();
+      else {
+        this.photos = this.sql.exec('SELECT id, file_id FROM photos ORDER BY id').toArray();
+        const by = new Map();
+        for (const p of this.photos) { const b = Math.floor(p.id / 1000); if (!by.has(b)) by.set(b, []); by.get(b).push(p); }
+        this.memoWrite('photos', by);
+      }
+    }
     return this.photos;
   }
 

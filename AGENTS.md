@@ -166,6 +166,7 @@
 | `viz` | `id`、`data`（base64；空字符串 = 确定算不了） |
 | `playlists` | `id`、`pos`、`name`、`cover`、`tracks`（消息号 JSON 数组）；照着网易云歌单建的还有 `pic`（封面地址）、`intro`、`src`（网易云歌单编号）、`wanted`（网易云里的歌 JSON，按顺序；这种歌单的歌由 `resolvePlaylists()` 每次现对，`tracks` 不用） |
 | `asks` | 听众求歌记录 `uid`、`at`（每人 24 小时 10 次） |
+| `memo` | 分桶缓存：歌表（每 500 个消息号一桶）、热门歌（按歌手名 16 桶）、频道图片、灰色歌。DO 醒来读几行桶就回来，不读原表几千行。`k` 是「名字\|v」（格式版本 `MEMO_V`）或「名字\|b\|桶号」 |
 | `grey` | 灰色歌（网易云上没有音源、只记了信息）：`sid`（网易云歌曲编号）、`info`（JSON，字段见 `cleanGrey()`）、`at`。整张表记在 DO 内存里 |
 | `artist_hot` | 歌手在网易云的热门 50 首：`name`（我们这边的歌手名）、`songs`（歌名 JSON 数组，`[]` = 网易云上没这位）、`retry_at`（过了就重取）、`pic`（网易云歌手照片地址，后来加的列）。整张表记在 DO 内存里 |
 | `config` | 键值对，见下表 |
@@ -203,7 +204,7 @@ node test.mjs
 ```
 
 - 要 **Node 22**（CI 也用 22）。用到 `node:sqlite` 的 `DatabaseSync` 模拟 DO，用 `module.register` 加载 `test/hooks.mjs`。不用 `npm install`。
-- 通过时最后一行是 `全部 N 项通过`（写这份文件时 N = 46）。任何一项失败，脚本会抛异常、退出码非 0。
+- 通过时最后一行是 `全部 N 项通过`（写这份文件时 N = 47）。任何一项失败，脚本会抛异常、退出码非 0。
 - 测试是**一个脚本从上到下顺序跑**，各项共用同一个 `env` 和数据库，前面的状态会带到后面。加测试用 `await t('说明', async () => { … })`，放在相关的那几项附近，结束前把自己加的歌删掉（参考现有用例最后的 `admin('remove', …)`）。
 - 外部请求都由 `globalThis.fetch` 的替身处理；**没被模拟的网址会抛 `unexpected fetch`**。加了新的外部请求，就在替身里加对应分支。
 - 常用的帮手：`req(path, init)` 请求 Worker；`hook(update)` 模拟 webhook；`admin(action, payload)` 调管理接口；`dm(uid, 文字)` 模拟私聊机器人；`lastSay()` 看机器人最后发的话；`bot.*`、`mode.*` 控制模拟服务的行为。
@@ -391,7 +392,7 @@ Worker 和流式服务没法同时上线，所以改动要**两边都向后兼�
 
 ### 6.5 Durable Object 和 Worker 的额度
 
-- DO 免费版每天最多读 500 万行。`listTracks()` 把整张歌表缓存在 DO 内存里；写了一首的 `songs` 或 `covers` 之后调 `this.touched(id)`（只重读这一首，一两行），批量改了才调 `this.changed()`（整表作废，下次整表重读几千行）。同步小号时一口气发几十首，每首都整表重读会用光额度。不要在每次请求、每次定时任务里 `SELECT * FROM songs` / 扫 `covers`。按图找封面走索引 `covers_data`。
+- DO 免费版每天最多读 500 万行。`listTracks()` 把整张歌表缓存在 DO 内存里；写了一首的 `songs` 或 `covers` 之后调 `this.touched(id)`（只重读这一首，并重写它在 `memo` 里的那一桶），批量改了才调 `this.changed()`（内存和 `memo` 都作废，下次整表重读几千行）。**绕过这两个直接改 songs、covers 会让 memo 里的歌表一直是旧的。** `summary()`、`trackRow()`、热门歌的存法变了要把 `MEMO_V` 加 1。DO 闲一两分钟就休眠，醒来读的是 memo 的桶，所以不要再加「醒来先整表读一遍」的东西。同步小号时一口气发几十首，每首都整表重读会用光额度。不要在每次请求、每次定时任务里 `SELECT * FROM songs` / 扫 `covers`。按图找封面走索引 `covers_data`。
 - 免费版 Worker 每次调用最多 50 个子请求，所以 `FILL_BATCH` 是 8、连着错 3 次就停。别把批量调大。
 - Worker isolate 里的缓存（`filePaths`、`recCache`、`listCache`）随时会丢，只能当加速用，不能存必须保留的东西。
 - 外部请求一律带 `AbortSignal.timeout(...)`；不用的响应体要 `res.body.cancel()`。

@@ -29,13 +29,13 @@ function makeSql(db = new DatabaseSync(':memory:')) {
     return { toArray: () => rows, rowsWritten: 0 };
   } };
 }
-async function makeLibrary(env, db) {
+async function makeLibrary(env, db = new DatabaseSync(':memory:')) {
   let ready;
   const ctx = { storage: { sql: makeSql(db) }, blockConcurrencyWhile(fn) { ready = fn(); return ready; } };
   const lib = new Library(ctx, env);
   await ready;
   return new Proxy({}, {
-    get: (_, name) => name === 'then' ? undefined : async (...args) => structuredClone(await lib[name](...structuredClone(args))),
+    get: (_, name) => name === 'then' ? undefined : name === '_db' ? db : async (...args) => structuredClone(await lib[name](...structuredClone(args))),
   });
 }
 // 更早版本的 KV：每页只给 1 条，逼出分页
@@ -284,7 +284,7 @@ await t('切片那一版的数据库：歌搬进 songs，状态列、chats 表�
   const old = await makeLibrary({ TRACKS: makeKV(oldTracks) }, db);
   assert.deepEqual((await old.listTracks()).map(x => x.id), [51, 7]); // 没有再从 KV 搬 4 和 12
   const tables = db.prepare("SELECT name FROM sqlite_master WHERE type = 'table' ORDER BY name").all().map(r => r.name);
-  assert.deepEqual(tables, ['artist_hot', 'asks', 'config', 'covers', 'grey', 'logo_covers', 'lyrics', 'photos', 'playlists', 'songs', 'viz']);
+  assert.deepEqual(tables, ['artist_hot', 'asks', 'config', 'covers', 'grey', 'logo_covers', 'lyrics', 'memo', 'photos', 'playlists', 'songs', 'viz']);
   assert.deepEqual(db.prepare('SELECT k FROM config ORDER BY k').all().map(r => r.k), ['coversV', 'migrated']);
   await makeLibrary({}, db); // 再启动一次：什么都不用做，也不报错
   assert.equal((await old.getTrack(7)).title, '旧版里的歌');
@@ -1350,6 +1350,28 @@ await t('发歌、删歌、配封面只重读那一首：内存里的歌表和�
   assert.equal(patched, JSON.stringify(await lib.listTracks()), '顺序、封面标记都和重读的一样');
   assert.ok((await lib.listTracks()).some(x => x.id === 941 && x.art === 1));
   await admin('remove', { track: 941 });
+});
+
+await t('数据库休眠后醒来：歌表、热门歌、频道图片、灰色歌从 memo 的桶里读回来（几行），不再把原表整张读一遍，内容一模一样', async () => {
+  await hook({ channel_post: audioPost(945, { file_id: addFile(bytesOf(10, 945)), file_size: 10, title: '醒来测试', performer: '小橘', duration: 100 }) });
+  await lib.putCover(945, 'image/jpeg', 'QUJD', 1);
+  await lib.putHot('小橘', ['醒来测试'], Date.now() + DAY, 'https://p1.music.126.net/a.jpg');
+  const before = { tracks: await lib.listTracks(), recs: await lib.listRecs(), hot: await lib.listHot(), photos: await lib.listPhotos(), grey: await lib.listGrey() };
+  const woke = await makeLibrary(env, lib._db);  // 同一份数据，新的 DO 实例（内存是空的）
+  const from = sqlLog.length;
+  const after = { tracks: await woke.listTracks(), recs: await woke.listRecs(), hot: await woke.listHot(), photos: await woke.listPhotos(), grey: await woke.listGrey() };
+  assert.deepEqual(after, before);
+  const reads = sqlLog.slice(from).filter(q => /^\s*SELECT/i.test(q));
+  assert.ok(!reads.some(q => /FROM (songs|artist_hot|photos|grey)\b/.test(q)), '不读原表：' + reads.join(' / '));
+  // 醒着的时候改一首：只重写它那一桶，再醒来也是新的
+  await woke.putCover(945, 'none', '', 0);
+  const woke2 = await makeLibrary(env, lib._db);
+  assert.equal((await woke2.listTracks()).find(x => x.id === 945).art, 0);
+  // 格式版本对不上（MEMO_V 改了）：作废重建，照样对
+  lib._db.prepare("UPDATE memo SET v = 'old' WHERE k = 'tracks|v'").run();
+  const woke3 = await makeLibrary(env, lib._db);
+  assert.deepEqual((await woke3.listTracks()).map(x => [x.id, x.art]), (await woke2.listTracks()).map(x => [x.id, x.art]));
+  await admin('remove', { track: 945 });
 });
 
 await t('数据库挂了（额度用完）：网页从 KV 快照照样能打开、能听；机器人说一声，不再不吭声', async () => {
