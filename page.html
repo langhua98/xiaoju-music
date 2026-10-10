@@ -859,8 +859,9 @@ h1{font-size:20px;margin:0;line-height:1.2}
     }
     var who = el('div', 'who');
     who.appendChild(el('b', null, g.name));
-    var nGrey = g.songs.filter(function(t){ return t.grey; }).length;
-    who.appendChild(el('span', null, (g.songs.length - nGrey) + ' 首' + (nGrey ? '（另有 ' + nGrey + ' 首暂无音源）' : '')));
+    var nWait = g.songs.filter(function(t){ return t.pl; }).length, nGrey = g.songs.filter(function(t){ return t.grey && !t.pl; }).length;
+    var extra = [nWait && nWait + ' 首待搬', nGrey && nGrey + ' 首暂无音源'].filter(Boolean).join('，');
+    who.appendChild(el('span', null, (g.songs.length - nWait - nGrey) + ' 首' + (extra ? '（另有 ' + extra + '）' : '')));
     if(g.intro) who.appendChild(el('span', 'intro', g.intro));
     var all = el('button', 'playall');
     all.type = 'button';
@@ -957,6 +958,7 @@ h1{font-size:20px;margin:0;line-height:1.2}
     var ra = el('span', 'ra');
     if(t.mime === 'audio/flac') ra.appendChild(el('em', 'badge', '无损'));
     ra.appendChild(document.createTextNode(t.playable ? [t.artist, fmt(t.duration)].filter(Boolean).join(' · ')
+      : t.pl ? [t.artist, t.grey].filter(Boolean).join(' · ') // 网易云歌单里还没搬进来的：等审核
       : t.grey ? [t.artist, '暂无音源（' + t.grey + '）'].filter(Boolean).join(' · ') : '暂时不能在网页播放'));
     info.appendChild(ra);
     var eq = el('span', 'eq');

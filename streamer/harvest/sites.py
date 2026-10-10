@@ -85,10 +85,11 @@ class NetEase:
             name = ((await self._get(http, '/playlist/detail', id=sid)).get('playlist') or {}).get('name') or ''
         return kind, _text(name), sid
 
-    async def items(self, url, limit, http):
+    async def items(self, url, limit, http, cookie=''):
         """支持单曲、歌单、专辑、歌手主页、用户主页（song / playlist / album / artist / user/home?id=…，
-        网页版带 #/ 的也行），和 App 分享的 163cn.tv 短链接。"""
-        kind, sid = await self._parse(url, http)
+        网页版带 #/ 的也行），和 App 分享的 163cn.tv 短链接。cookie：登录的账号（频道主的私密歌单要它）"""
+        kind, sid = await self._parse(url, http, cookie)
+        login = {'cookie': cookie} if cookie else {}
         if not kind:
             return
         if kind == 'song':
@@ -96,7 +97,7 @@ class NetEase:
         elif kind == 'album':
             songs = (await self._get(http, '/album', id=sid)).get('songs') or []
         elif kind == 'playlist':
-            songs = (await self._get(http, '/playlist/track/all', id=sid, limit=str(limit), offset='0')).get('songs') or []
+            songs = (await self._get(http, '/playlist/track/all', id=sid, limit=str(limit), offset='0', **login)).get('songs') or []
         else:  # 歌手：按发布时间从新到旧
             songs, offset = [], 0
             while len(songs) < limit:

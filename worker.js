@@ -374,7 +374,7 @@ function resolvePlaylists(lists, tracks, greyOut) {
       ids.push(-Number(w.sid));
       if (!greySids.has(w.sid)) {
         greySids.add(w.sid);
-        greyOut.push({ sid: w.sid, title: w.title, artist: w.artist, album: '', year: '', duration: w.duration, why: '小橘音乐里还没有', pl: 1 });
+        greyOut.push({ sid: w.sid, title: w.title, artist: w.artist, album: '', year: '', duration: w.duration, why: '待搬：审核通过后就能听', pl: 1 });
       }
     }
     return { id: p.id, name: p.name, cover: p.cover, tracks: ids, pic: p.pic, intro: p.intro };
@@ -2284,15 +2284,18 @@ async function setHarvestPlaylist(env, chat, name) {
 }
 
 // what：{url} 抓这个网址里的歌，或 {query} 去网站上按关键词搜
-async function ownerHarvest(env, chat, what, n, origin) {
+// scan：整个歌单搬时给歌单首数，流式服务把整个歌单看一遍（前面全是库里已有的也看得到后面）
+async function ownerHarvest(env, chat, what, n, origin, scan = 0) {
   if (!streamerOn(env)) return say(env, chat, '搬运服务没配置');
   const L = lib(env), settings = await L.getHarvest();
   if (n) settings.limit = Math.max(1, Math.min(n, 200));
+  if (scan) settings.scan = Math.min(scan, 1000);
   let r;
   try {
     r = await streamerCall(env, '/harvest', {
       ...what, settings: { ...settings, sites: Object.keys(HARVEST_SITES) }, notify: chat, link: origin,
       existing: (await L.listTracks()).map(t => [t.title, t.artist]),
+      cookie: (await neteaseAccount(env)).cookie || '',  // 私密歌单要登录的账号才取得到
     });
   } catch {
     return say(env, chat, `搬运服务正在唤醒，过一两分钟再发一次${what.query ? '' : '网址'}`);
@@ -2385,24 +2388,26 @@ async function ownerLink(env, chat, url, n, origin) {
     await say(env, chat, fresh ? `👥 加了小号「${alt.name || alt.id}」（第 ${alts.length} 个）。以后它热门前 50 首里库里没有的，不用审核，直接发进频道。` : `👥 「${alt.name || alt.id}」已经是小号了，现在同步一遍。`);
     return syncAlts(env, chat, [alt]);
   }
-  if (d.kind === 'playlist') await importPlaylist(env, chat, url, origin);
+  if (d.kind === 'playlist' && !n) {
+    if (await importPlaylist(env, chat, url, origin)) return null;  // 建好歌单、出了审核单
+  }
   if (n || d.kind === 'song') return ownerHarvest(env, chat, { url }, n, origin);
   return harvestCount(env, chat, url, origin);
 }
 
 // 贴了网易云歌单：照着它在网页上建一个同名歌单（名字、封面、简介、顺序），库里有的马上放进去；
-// 库里没有的接着照旧数一数、出审核单（只搬自己的歌），通过发进频道后自动出现在歌单里，不通过的在歌单里是灰色
+// 库里没有的直接出审核单（不再先数一数等按按钮），通过发进频道后自动出现在歌单里对应的位置。
+// → true：建好了（审核单也开始抓了）；false：歌单没取到，调用的地方照旧数一数
 async function importPlaylist(env, chat, url, origin) {
   let r;
   try {
     r = await streamerCall(env, '/harvest/playlist', { url, cookie: (await neteaseAccount(env)).cookie || '' });
   } catch {
-    return say(env, chat, '歌单没取到（搬运服务在唤醒），过一两分钟再发一次网址');
+    return false;
   }
-  if (r.status !== 200) return say(env, chat, `歌单没取到：${(r.data && typeof r.data.detail === 'string' && r.data.detail) || '网易云这次没给，过一会儿再发一次'}`);
-  const d = r.data || {};
+  const d = (r.status === 200 && r.data) || {};
   const wanted = (Array.isArray(d.songs) ? d.songs : []).map(cleanWanted).filter(Boolean).slice(0, 1000);
-  if (!/^\d{1,20}$/.test(String(d.id || ''))) return say(env, chat, '歌单没取到：网易云给的数据不对');
+  if (!/^\d{1,20}$/.test(String(d.id || ''))) return false;
   const pic = String(d.cover || '');
   const L = lib(env);
   const { fresh } = await L.putNeteasePlaylist({
@@ -2412,8 +2417,11 @@ async function importPlaylist(env, chat, url, origin) {
   listCache = null;
   const have = new Set((await L.listTracks()).map(t => norm(t.title) + '|' + norm(t.artist)));
   const inLib = wanted.filter(w => have.has(norm(w.title) + '|' + norm(w.artist))).length;
-  return say(env, chat, `📋 ${fresh ? '建好' : '更新了'}歌单「${d.name}」：一共 ${wanted.length} 首，小橘音乐里已有的 ${inLib} 首已经按网易云的顺序放进去了` +
-    (wanted.length > inLib ? `，还没有的 ${wanted.length - inLib} 首在歌单里先显示成灰色。` : '。') + `\n${origin}/`);
+  const left = wanted.length - inLib;
+  await say(env, chat, `📋 ${fresh ? '建好' : '更新了'}歌单「${d.name}」：一共 ${wanted.length} 首，小橘音乐里已有的 ${inLib} 首已经按网易云的顺序放进去了` +
+    (left ? `。还没有的 ${left} 首马上出审核单给你${left > 200 ? '（一次最多 200 首，审完再发一次这个网址出下一批）' : ''}，通过后发进频道，就会出现在歌单里。` : '，都齐了 👌') + `\n${origin}/`);
+  if (left) await ownerHarvest(env, chat, { url }, Math.min(left, 200), origin, wanted.length);
+  return true;
 }
 
 function cleanWanted(w) {

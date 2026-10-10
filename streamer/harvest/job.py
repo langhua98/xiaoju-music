@@ -6,6 +6,7 @@
 一次只跑一个（抓取或发帖）；结果（每首怎样了、为什么）记在 state 里，跑完通知频道主。"""
 
 import asyncio
+import inspect
 import logging
 import re
 import secrets
@@ -155,10 +156,10 @@ class Harvester:
 
     # ── 抓取：网址里的歌 → 审核单 ──
 
-    def start(self, url, settings, existing, notify=None, link='', query=''):
+    def start(self, url, settings, existing, notify=None, link='', query='', cookie=''):
         """抓网址 url 里的歌；给了 query 就不看网址，去网站上按关键词搜。
         settings：{sites: [开着的网站], limit: 最多抓几首}。existing：库里已有的 [(歌名, 作者)]，有了的不进审核单。
-        link：Worker 的网址，审核单里「查看全部」用"""
+        link：Worker 的网址，审核单里「查看全部」用。cookie：频道主登录过的网站账号（私密歌单要它才取得到）"""
         if self.running():
             raise RuntimeError('already running')
         adapter, why = self.check_query(settings) if query else self.check_url(url, settings)
@@ -167,16 +168,19 @@ class Harvester:
         self.state = self._fresh('crawl', url, adapter.name)
         self.state['query'] = query
         seen = {norm(t) + '|' + norm(a) for t, a in existing}
-        self.task = asyncio.create_task(self._crawl(adapter, url, query, settings, seen, notify, link))
+        self.task = asyncio.create_task(self._crawl(adapter, url, query, settings, seen, notify, link, cookie))
 
-    async def _crawl(self, adapter, url, query, settings, seen, notify, link):
+    async def _crawl(self, adapter, url, query, settings, seen, notify, link, cookie=''):
         st = self.state
         limit = max(1, min(int(settings.get('limit') or 20), 200))
+        # 看多少首：默认审核单上限的 3 倍（库里已有的会跳过）；整个歌单搬时 Worker 给 scan＝歌单首数，前面全是已有的也看得到后面
+        scan = max(limit * 3, min(int(settings.get('scan') or 0), 1000))
+        login = {'cookie': cookie} if cookie and 'cookie' in inspect.signature(adapter.items).parameters else {}
         pending = []
         try:
             # 多看一些：库里已有的会跳过
             queued = set()
-            found = adapter.search(query, limit * 3, self.http) if query else adapter.items(url, limit * 3, self.http)
+            found = adapter.search(query, limit * 3, self.http) if query else adapter.items(url, scan, self.http, **login)
             async for t in found:
                 if len(pending) >= limit:
                     break

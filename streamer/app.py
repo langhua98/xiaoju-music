@@ -798,7 +798,7 @@ async def harvest_start(request: Request):
     existing = [(str(t), str(a)) for t, a in body.get('existing', [])]
     try:
         harvester.start(url, body.get('settings') or {}, existing, notify=body.get('notify') or None,
-                        link=str(body.get('link') or ''), query=query)
+                        link=str(body.get('link') or ''), query=query, cookie=str(body.get('cookie') or ''))
     except ValueError as e:
         raise HTTPException(400, str(e))
     except RuntimeError:
