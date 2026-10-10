@@ -16,8 +16,10 @@ const MB = 1024 * 1024;
 const LIMIT = 20 * MB;
 
 // ── 模拟 Durable Object（SQLite + 结构化克隆，和 RPC 一样不共享引用）──
+const sqlLog = [];  // 跑过的查询（检查「读一次就记在内存里」用）
 function makeSql(db = new DatabaseSync(':memory:')) {
   return { exec: (query, ...params) => {
+    sqlLog.push(query);
     const st = db.prepare(query);
     if (!/^\s*(SELECT|WITH|PRAGMA)\b/i.test(query) && !/\bRETURNING\b/i.test(query)) {  // 写入：和 Cloudflare 一样给 rowsWritten
       const info = st.run(...params);
@@ -371,6 +373,14 @@ await t('封面：没有自带封面的歌，从频道图片帖里随机挑一�
     { file_id: addFile(JPEG(20)), width: 1280, height: 960 },
   ] } });
   assert.deepEqual(await lib.listPhotos(), [{ id: 80, file_id: [...files.entries()].find(([, v]) => v === newPhoto)[0] }]);
+  // 频道图片表读一次就记在内存里：配封面时不再每次整表读（免费版每天读的行数有限）；加了新图片才重读
+  const photoReads = () => sqlLog.filter(q => /SELECT .* FROM photos/.test(q)).length;
+  let before = photoReads();
+  await lib.listPhotos(); await lib.listPhotos();
+  assert.equal(photoReads(), before, '读过就不再读');
+  await lib.addScannedPhotos([80]);  // 已经有的：表没变，但照样作废重读一次
+  await lib.listPhotos(); await lib.listPhotos();
+  assert.equal(photoReads(), before + 1, '加过图片重读一次');
   await hook({ channel_post: audioPost(73, { file_id: addFile(bytesOf(10, 3)), file_size: 10 }) });
   let r = await req('/c/73');
   assert.equal(r.status, 200);
