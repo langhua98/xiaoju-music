@@ -497,6 +497,32 @@ def test_songs_without_a_source_are_remembered_as_grey(monkeypatch):
     assert [g['sid'] for g in c.get('/harvest/grey', headers={'X-Key': 'k1'}).json()['songs']] == ['1', '2']
 
 
+def test_whole_playlist_crawl_uses_the_login_and_looks_past_songs_we_have():
+    got, said = [], []
+
+    class Pl(Site):
+        async def items(self, url, limit, http, cookie=''):
+            got.append((limit, cookie))
+            for t in self.tracks[:limit]:
+                yield t
+
+    async def say(chat, text, buttons=None):
+        said.append(text)
+
+    # 歌单 300 首，前面 290 首库里都有，最后 10 首没有
+    tracks = [Track(f'有{i}', '甲', '', f'p{i}', sid=str(i)) for i in range(290)] + [Track(f'没有{i}', '甲', '', f'q{i}', sid=str(1000 + i)) for i in range(10)]
+
+    async def main():
+        h = Harvester(http=None, send=None, say=say)
+        h.check_url = lambda *a: (Pl(tracks), None)
+        h.start('u', {**SETTINGS, 'limit': 10, 'scan': 300}, [(f'有{i}', '甲') for i in range(290)], notify=9, cookie='MUSIC_U=x')
+        await h.task
+        return h
+    h = asyncio.run(main())
+    assert got == [(300, 'MUSIC_U=x')], '带上登录的账号（私密歌单），整个歌单都看'
+    assert h.state['review'] == 10 and h.state['skipped'] == 290
+
+
 def test_alt_sync_with_nothing_new():
     said = []
 

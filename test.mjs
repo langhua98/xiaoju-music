@@ -1462,12 +1462,16 @@ await t('贴网易云歌单：照着建一个同名歌单（封面、简介、�
   assert.equal(pl.body.url, 'https://music.163.com/#/playlist?id=7');
   assert.equal(typeof pl.body.cookie, 'string', '带上网易云账号，私密歌单也取得到');
   const said = bot.out.filter(o => o.method === 'sendMessage').slice(-2).map(o => o.text);
-  assert.match(said[0], /建好歌单「小橘的夜」：一共 3 首，小橘音乐里已有的 2 首已经按网易云的顺序放进去了，还没有的 1 首在歌单里先显示成灰色/);
-  assert.match(said[1], /歌单「小橘的夜」：一共 3 首.*没搬的 1 首/, '库里没有的照旧数一数、出审核单');
+  assert.match(said[0], /建好歌单「小橘的夜」：一共 3 首，小橘音乐里已有的 2 首已经按网易云的顺序放进去了。还没有的 1 首马上出审核单给你，通过后发进频道，就会出现在歌单里/);
+  // 库里没有的直接出审核单（不再先数一数、等按按钮）：带上登录的账号（私密歌单），整个歌单都看
+  const hv = bot.toStreamer.filter(x => x.path === 'harvest').at(-1);
+  assert.deepEqual([hv.body.url, hv.body.settings.limit, hv.body.settings.scan, typeof hv.body.cookie], ['https://music.163.com/#/playlist?id=7', 1, 3, 'string']);
+  assert.ok(!bot.toStreamer.some(x => x.path === 'harvest/count' && x.body.url === hv.body.url), '不再先数一数');
+  assert.match(said[1], /开始从网易云音乐 music\.163\.com抓，最多 1 首。抓完发审核单给你/);
   let d = await jsonOf(await req('/api/tracks'));
   const p = d.playlists[0];
   assert.deepEqual([p.name, p.pic, p.intro, p.tracks], ['小橘的夜', 'https://p1.music.126.net/c.jpg', '睡前听', [972, -9, 971]], '新建的排最前，按网易云的顺序');
-  assert.deepEqual(d.grey.find(g => g.sid === '9'), { sid: '9', title: '没有的歌', artist: '别人', album: '', year: '', duration: 200, why: '小橘音乐里还没有', pl: 1 });
+  assert.deepEqual(d.grey.find(g => g.sid === '9'), { sid: '9', title: '没有的歌', artist: '别人', album: '', year: '', duration: 200, why: '待搬：审核通过后就能听', pl: 1 });
   assert.ok(!('wanted' in p) && !('src' in p), '网页不用的不给');
   // 后来搬进来了：自动出现在歌单里对应的位置
   await hook({ channel_post: audioPost(973, { file_id: addFile(bytesOf(10, 973)), file_size: 10, title: '没有的歌', performer: '别人', duration: 200 }) });
@@ -1478,14 +1482,17 @@ await t('贴网易云歌单：照着建一个同名歌单（封面、简介、�
   bot.playlist = { ...bot.playlist, name: '小橘的夜（新）', songs: [{ sid: '1', title: '晴天', artist: '周杰伦', duration: 269 }] };
   const n = d.playlists.length;
   await dm(OWNER, 'https://music.163.com/playlist?id=7');
-  assert.match(bot.out.filter(o => o.method === 'sendMessage').at(-2).text, /更新了歌单「小橘的夜（新）」：一共 1 首/);
+  assert.match(lastSay().text, /更新了歌单「小橘的夜（新）」：一共 1 首，小橘音乐里已有的 1 首已经按网易云的顺序放进去了，都齐了/, '都有了就不出审核单');
   d = await jsonOf(await req('/api/tracks'));
   assert.equal(d.playlists.length, n);
   assert.deepEqual([d.playlists[0].name, d.playlists[0].tracks], ['小橘的夜（新）', [971]]);
   await dm(OWNER, '统计');
   assert.match(lastSay().text, /· 小橘的夜（新） 1 首（照着网易云歌单）/);
-  // 不是歌单：照旧
+  // 歌单没取到（流式服务旧版、网易云抽风）：照旧数一数、按按钮再抓
   bot.playlist = null;
+  bot.count = { site: '网易云音乐 music.163.com', kind: 'playlist', name: '别的', total: 5, have: 1 };
+  await dm(OWNER, 'https://music.163.com/playlist?id=8');
+  assert.match(lastSay().text, /歌单「别的」：一共 5 首.*没搬的 4 首/);
   bot.describe = null; bot.count = null;
   for (const id of [971, 972, 973]) await admin('remove', { track: id });
 });
