@@ -159,7 +159,7 @@ globalThis.fetch = async (input, init = {}) => {
     return Response.json({ code: 200, lrc: { version: 1, lyric: neteaseLyrics.get(Number(m[1])) || '' } });
   }
   // 机器人要用的流式服务接口：记下收到的请求，按 bot 里设好的回
-  if ((m = url.match(/^https:\/\/streamer\.example\/(fulfill|copy\/start|copy\/pick|auto\/start|auto\/status|search\/global|harvest|harvest\/count|harvest\/describe|harvest\/alts|harvest\/review(?:\/[a-z0-9]+)?|harvest\/status|harvest\/grey|copy\/status|netease\/login|netease\/session|netease\/check)(?:\?(.*))?$/)) || url === STREAMER + '/') {
+  if ((m = url.match(/^https:\/\/streamer\.example\/(fulfill|copy\/start|copy\/pick|auto\/start|auto\/status|search\/global|harvest|harvest\/count|harvest\/describe|harvest\/alts|harvest\/review(?:\/[a-z0-9]+)?|harvest\/status|harvest\/grey|harvest\/playlist|copy\/status|netease\/login|netease\/session|netease\/check)(?:\?(.*))?$/)) || url === STREAMER + '/') {
     if (bot.streamerDown) throw new TypeError('fetch failed');
     if (url === STREAMER + '/') return Response.json({ ok: true });
     assert.equal(headers.get('X-Key'), SKEY);
@@ -176,6 +176,7 @@ globalThis.fetch = async (input, init = {}) => {
     if (m[1] === 'netease/session') return Response.json(bot.netease || {});
     if (m[1] === 'harvest/status') return Response.json(bot.harvestState || { status: 'idle' });
     if (m[1] === 'harvest/grey') return Response.json({ songs: bot.grey || [] });
+    if (m[1] === 'harvest/playlist') return bot.playlist ? Response.json(bot.playlist) : Response.json({ detail: '这不是歌单的网址' }, { status: 400 });
     if (m[1] === 'copy/status') return Response.json(bot.copyState || { logged_in: true, status: 'idle' });
     if (m[1] === 'netease/check') return Response.json(bot.check || { login: false, songs: [], channel: { ok: true, title: '小橘🍊音乐' } });
     if (m[1].startsWith('harvest/review/')) return bot.sheet ? Response.json(bot.sheet) : Response.json({ detail: 'no such sheet' }, { status: 404 });
@@ -1446,6 +1447,47 @@ await t('灰色歌：网易云上没有音源的只记信息，网页上灰色�
   bot.deletedMsgs = null;
   bot.grey = [];
   await admin('remove', { track: 961 });
+});
+
+await t('贴网易云歌单：照着建一个同名歌单（封面、简介、顺序），库里有的放进去，没有的在歌单里灰色，再贴一次就更新', async () => {
+  await hook({ channel_post: audioPost(971, { file_id: addFile(bytesOf(10, 971)), file_size: 10, title: '晴天', performer: '周杰伦', duration: 269 }) });
+  await hook({ channel_post: audioPost(972, { file_id: addFile(bytesOf(10, 972)), file_size: 10, title: '稻香', performer: '周杰伦', duration: 223 }) });
+  bot.describe = { site: '网易云音乐 music.163.com', kind: 'playlist', name: '小橘的夜', id: '7' };
+  bot.count = { site: '网易云音乐 music.163.com', kind: 'playlist', name: '小橘的夜', total: 3, have: 2 };
+  bot.playlist = { id: '7', name: '小橘的夜', cover: 'https://p1.music.126.net/c.jpg', intro: '睡前听',
+    songs: [{ sid: '3', title: '稻香', artist: '周杰伦', duration: 223 }, { sid: '9', title: '没有的歌', artist: '别人', duration: 200 },
+            { sid: '1', title: '晴天', artist: '周杰伦', duration: 269 }, { sid: 'x', title: '坏数据' }] };
+  await dm(OWNER, 'https://music.163.com/#/playlist?id=7');
+  const pl = bot.toStreamer.filter(x => x.path === 'harvest/playlist').at(-1);
+  assert.equal(pl.body.url, 'https://music.163.com/#/playlist?id=7');
+  assert.equal(typeof pl.body.cookie, 'string', '带上网易云账号，私密歌单也取得到');
+  const said = bot.out.filter(o => o.method === 'sendMessage').slice(-2).map(o => o.text);
+  assert.match(said[0], /建好歌单「小橘的夜」：一共 3 首，小橘音乐里已有的 2 首已经按网易云的顺序放进去了，还没有的 1 首在歌单里先显示成灰色/);
+  assert.match(said[1], /歌单「小橘的夜」：一共 3 首.*没搬的 1 首/, '库里没有的照旧数一数、出审核单');
+  let d = await jsonOf(await req('/api/tracks'));
+  const p = d.playlists[0];
+  assert.deepEqual([p.name, p.pic, p.intro, p.tracks], ['小橘的夜', 'https://p1.music.126.net/c.jpg', '睡前听', [972, -9, 971]], '新建的排最前，按网易云的顺序');
+  assert.deepEqual(d.grey.find(g => g.sid === '9'), { sid: '9', title: '没有的歌', artist: '别人', album: '', year: '', duration: 200, why: '小橘音乐里还没有', pl: 1 });
+  assert.ok(!('wanted' in p) && !('src' in p), '网页不用的不给');
+  // 后来搬进来了：自动出现在歌单里对应的位置
+  await hook({ channel_post: audioPost(973, { file_id: addFile(bytesOf(10, 973)), file_size: 10, title: '没有的歌', performer: '别人', duration: 200 }) });
+  d = await jsonOf(await req('/api/tracks'));
+  assert.deepEqual(d.playlists[0].tracks, [972, 973, 971]);
+  assert.ok(!d.grey.some(g => g.sid === '9'));
+  // 网易云那边改了，再贴一次：更新同一个歌单，不另建
+  bot.playlist = { ...bot.playlist, name: '小橘的夜（新）', songs: [{ sid: '1', title: '晴天', artist: '周杰伦', duration: 269 }] };
+  const n = d.playlists.length;
+  await dm(OWNER, 'https://music.163.com/playlist?id=7');
+  assert.match(bot.out.filter(o => o.method === 'sendMessage').at(-2).text, /更新了歌单「小橘的夜（新）」：一共 1 首/);
+  d = await jsonOf(await req('/api/tracks'));
+  assert.equal(d.playlists.length, n);
+  assert.deepEqual([d.playlists[0].name, d.playlists[0].tracks], ['小橘的夜（新）', [971]]);
+  await dm(OWNER, '统计');
+  assert.match(lastSay().text, /· 小橘的夜（新） 1 首（照着网易云歌单）/);
+  // 不是歌单：照旧
+  bot.playlist = null;
+  bot.describe = null; bot.count = null;
+  for (const id of [971, 972, 973]) await admin('remove', { track: id });
 });
 
 await t('路由：404、405、CORS 预检', async () => {

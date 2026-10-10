@@ -159,6 +159,24 @@ def test_netease_download_needs_a_full_song_not_a_trial():
         dl({'code': 200, 'data': [{'id': 11, 'url': None}]})
 
 
+def test_netease_playlist_whole():
+    pages = {
+        NE + '/playlist/detail?cookie=MUSIC_U=x&id=7': {'code': 200, 'playlist': {
+            'name': '小橘的<b>夜</b>', 'coverImgUrl': 'http://p1.music.126.net/c.jpg', 'description': '睡前听'}},
+        NE + '/playlist/track/all?cookie=MUSIC_U=x&id=7&limit=1000&offset=0': {'code': 200, 'songs': [
+            ne_song(1, '晴天', ['周杰伦']), ne_song(2, '合唱', ['甲', '乙'])]},
+    }
+    http = FakeHttp(pages)
+    got = asyncio.run(NetEase(NE).playlist('https://music.163.com/#/playlist?id=7', http, 'MUSIC_U=x'))
+    assert got == {'id': '7', 'name': '小橘的夜', 'cover': 'https://p1.music.126.net/c.jpg', 'intro': '睡前听',
+                   'songs': [{'sid': '1', 'title': '晴天', 'artist': '周杰伦', 'duration': got['songs'][0]['duration']},
+                             {'sid': '2', 'title': '合唱', 'artist': '甲 / 乙', 'duration': got['songs'][1]['duration']}]}
+    pages[NE + '/playlist/detail?cookie=MUSIC_U=x&id=7']['playlist']['coverImgUrl'] = 'https://evil.example/x.jpg'
+    assert asyncio.run(NetEase(NE).playlist('https://music.163.com/playlist?id=7', http, 'MUSIC_U=x'))['cover'] == '', '封面只认网易云的图片服务器'
+    with pytest.raises(ValueError, match='不是歌单'):
+        asyncio.run(NetEase(NE).playlist('https://music.163.com/song?id=1', FakeHttp({}), ''))
+
+
 def test_netease_info_of_a_song_without_a_source():
     t = Track('天黑黑', '孙燕姿', '', 'https://music.163.com/song?id=11', 233.7, sid='11')
     detail = {'code': 200, 'songs': [{'id': 11, 'name': '天黑黑', 'fee': 1, 'pop': 100, 'dt': 233733, 'publishTime': 1179158400000,

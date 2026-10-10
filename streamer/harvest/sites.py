@@ -25,6 +25,11 @@ class Track:
     sid: str = ''         # 网站上的编号（适配器有 download() 时，发帖前用它现取下载地址）
 
 
+def https_url(u):
+    u = str(u or '').strip()
+    return 'https://' + u[len('http://'):] if u.startswith('http://') else u
+
+
 def _text(v):
     if isinstance(v, list):
         v = ', '.join(str(x) for x in v if x)
@@ -103,6 +108,26 @@ class NetEase:
                     break
         for s in songs[:limit]:
             yield self._track(s)
+
+    PLAYLIST_MOST = 1000  # 一个歌单最多搬多少首
+
+    async def playlist(self, url, http, cookie=''):
+        """歌单整个搬过来用：→ {id, name, cover, intro, songs: [{sid, title, artist, duration}]}（按歌单里的顺序）。
+        带上登录的账号，频道主自己的私密歌单也取得到。不是歌单 → ValueError"""
+        kind, sid = await self._parse(url, http, cookie)
+        if kind != 'playlist':
+            raise ValueError('这不是歌单的网址')
+        login = {'cookie': cookie} if cookie else {}
+        p = (await self._get(http, '/playlist/detail', id=sid, **login)).get('playlist') or {}
+        songs = (await self._get(http, '/playlist/track/all', id=sid, limit=str(self.PLAYLIST_MOST), offset='0', **login)).get('songs') or []
+        cover = https_url(p.get('coverImgUrl'))
+        return {
+            'id': str(sid), 'name': _text(p.get('name'))[:60] or f'歌单 {sid}',
+            'cover': cover if re.match(r'^https://p\d+\.music\.126\.net/', cover) else '',
+            'intro': _text(p.get('description'))[:500],
+            'songs': [{'sid': t.sid, 'title': t.title, 'artist': t.artist, 'duration': round(t.duration)}
+                      for t in map(self._track, songs[:self.PLAYLIST_MOST])],
+        }
 
     async def hot(self, url, http, cookie=''):
         """主页（歌手主页、音乐人的用户主页）的热门歌：网易云的「热门 50 首」。不是主页 → 什么也没有。

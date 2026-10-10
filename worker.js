@@ -350,10 +350,34 @@ async function tracksFor(env) {
 }
 
 async function listBody(env) {
-  const [tracks, playlists, hot, grey] = await Promise.all([tracksFor(env), lib(env).listPlaylists(), lib(env).listHot(), lib(env).listGrey()]);
-  return JSON.stringify({
-    channel: env.CHANNEL_USERNAME || '', tracks, playlists, hot: hotOrder(tracks, hot.songs), pics: hot.pics,
-    grey: stillGrey(grey, tracks).map(({ sid, title, artist, album, year, duration, why }) => ({ sid, title, artist, album, year, duration, why })),
+  const [tracks, lists, hot, grey] = await Promise.all([tracksFor(env), lib(env).listPlaylists(), lib(env).listHot(), lib(env).listGrey()]);
+  const greyOut = stillGrey(grey, tracks).map(({ sid, title, artist, album, year, duration, why }) => ({ sid, title, artist, album, year, duration, why }));
+  const playlists = resolvePlaylists(lists, tracks, greyOut);
+  return JSON.stringify({ channel: env.CHANNEL_USERNAME || '', tracks, playlists, hot: hotOrder(tracks, hot.songs), pics: hot.pics, grey: greyOut });
+}
+
+// 照着网易云歌单建的：按网易云里的顺序现对一遍，库里有的放消息号；还没有的放「负的网易云编号」，网页上显示成灰色。
+// 这些灰色只在歌单里出现（pl: 1），不进「全部」和歌手页；已经是灰色歌（网易云没音源）的就用那条，原因写得更清楚
+function resolvePlaylists(lists, tracks, greyOut) {
+  const byKey = new Map();
+  for (const t of tracks) {
+    const k = norm(t.title) + '|' + norm(t.artist);
+    if (!byKey.has(k)) byKey.set(k, t.id);  // 同名同歌手有几首：用最新的
+  }
+  const greySids = new Set(greyOut.map(g => g.sid));
+  return lists.map(p => {
+    if (!p.src) return p;
+    const ids = [];
+    for (const w of p.wanted) {
+      const id = byKey.get(norm(w.title) + '|' + norm(w.artist));
+      if (id) { if (!ids.includes(id)) ids.push(id); continue; }
+      ids.push(-Number(w.sid));
+      if (!greySids.has(w.sid)) {
+        greySids.add(w.sid);
+        greyOut.push({ sid: w.sid, title: w.title, artist: w.artist, album: '', year: '', duration: w.duration, why: '小橘音乐里还没有', pl: 1 });
+      }
+    }
+    return { id: p.id, name: p.name, cover: p.cover, tracks: ids, pic: p.pic, intro: p.intro };
   });
 }
 
@@ -1307,6 +1331,12 @@ export class Library extends DurableObject {
       this.sql.exec('CREATE TABLE IF NOT EXISTS artist_hot (name TEXT PRIMARY KEY, songs TEXT NOT NULL, retry_at INTEGER NOT NULL)');
       // 灰色歌：网易云上没有音源、只记了信息的歌。sid 是网易云歌曲编号，info 是 JSON（见 worker 的 cleanGrey）
       this.sql.exec('CREATE TABLE IF NOT EXISTS grey (sid TEXT PRIMARY KEY, info TEXT NOT NULL, at INTEGER NOT NULL)');
+      // 照着网易云歌单建的歌单：pic 封面地址（p*.music.126.net）、intro 简介、src 网易云歌单编号、
+      // wanted 网易云里的歌（JSON [{sid, title, artist, duration}]，按顺序）。这种歌单里放哪些歌每次按 wanted 现对，库里有了就自动进来
+      const plCols = this.sql.exec('PRAGMA table_info(playlists)').toArray().map(r => r.name);
+      for (const c of ['pic', 'intro', 'src', 'wanted']) {
+        if (!plCols.includes(c)) this.sql.exec(`ALTER TABLE playlists ADD COLUMN ${c} TEXT NOT NULL DEFAULT ''`);
+      }
       // pic：网易云的歌手照片地址（p*.music.126.net），歌手页当头像；空 = 还没有
       if (!this.sql.exec('PRAGMA table_info(artist_hot)').toArray().some(r => r.name === 'pic')) {
         this.sql.exec("ALTER TABLE artist_hot ADD COLUMN pic TEXT NOT NULL DEFAULT ''");
@@ -1552,8 +1582,22 @@ export class Library extends DurableObject {
   }
 
   async listPlaylists() {
-    return this.sql.exec('SELECT id, name, cover, tracks FROM playlists ORDER BY pos').toArray()
-      .map(r => ({ id: r.id, name: r.name, cover: r.cover, tracks: JSON.parse(r.tracks) }));
+    return this.sql.exec('SELECT id, name, cover, tracks, pic, intro, src, wanted FROM playlists ORDER BY pos').toArray()
+      .map(r => ({ id: r.id, name: r.name, cover: r.cover, tracks: JSON.parse(r.tracks),
+        ...(r.src ? { pic: r.pic, intro: r.intro, src: r.src, wanted: JSON.parse(r.wanted || '[]') } : {}) }));
+  }
+
+  // 照着网易云歌单建（同一个网易云歌单再发一次就更新）：新建的排在最前面。→ { id, fresh }
+  async putNeteasePlaylist({ src, name, pic, intro, wanted }) {
+    const old = this.sql.exec('SELECT id FROM playlists WHERE src = ?', src).toArray()[0];
+    if (old) {
+      this.sql.exec('UPDATE playlists SET name = ?, pic = ?, intro = ?, wanted = ? WHERE id = ?', name, pic, intro, JSON.stringify(wanted), old.id);
+      return { id: old.id, fresh: false };
+    }
+    const top = this.sql.exec('SELECT MIN(pos) AS p FROM playlists').toArray()[0];
+    const id = this.sql.exec(`INSERT INTO playlists (pos, name, cover, tracks, pic, intro, src, wanted) VALUES (?, ?, 0, '[]', ?, ?, ?, ?) RETURNING id`,
+      ((top && top.p) || 0) - 1, name, pic, intro, src, JSON.stringify(wanted)).toArray()[0].id;
+    return { id, fresh: true };
   }
 
   // 整体换掉：给的是 [{ id?, name, cover?, tracks }]，没带 id（或 id 不存在）的是新歌单。
@@ -2028,7 +2072,7 @@ async function ownerStats(env, chat) {
   lines.push(`封面：专辑图 ${c.art || 0} 首，频道图片 ${c.photo || 0} 首，没有 ${c.none || 0} 首` + (c.todo ? `，还有 ${c.todo} 首在后台找` : ''));
   lines.push(`歌词：带时间轴 ${w.synced || 0} 首，只有文字 ${w.plain || 0} 首，没有 ${w.none || 0} 首` + (w.todo ? `，还有 ${w.todo} 首在后台找` : ''));
   if (auto.lastStart) lines.push(`上次夜里自动搬：${auto.lastStart.slice(0, 10)}${auto.lastCopied != null ? `，搬了 ${auto.lastCopied} 首` : ''}`);
-  lines.push('', '各歌单：', ...(await L.listPlaylists()).map(p => `· ${p.name} ${p.tracks.length} 首`));
+  lines.push('', '各歌单：', ...(await L.listPlaylists()).map(p => `· ${p.name} ${p.src ? `${p.wanted.length} 首（照着网易云歌单）` : `${p.tracks.length} 首`}`));
   return say(env, chat, lines.join('\n'));
 }
 
@@ -2108,7 +2152,7 @@ async function botButton(env, cb, owner, origin) {
   const pls = await L.listPlaylists();
   if (kind === 'a') {
     await ack();
-    const opts = pls.filter(p => !p.tracks.includes(id));
+    const opts = pls.filter(p => !p.src && !p.tracks.includes(id));  // 照着网易云建的歌单跟着网易云走，不在这里手动加
     if (!opts.length) return say(env, chat, '已经在所有歌单里了');
     return say(env, chat, `把「${t.title}」加到哪个歌单？`, rows(opts.map(p => ({ text: p.name, callback_data: `ap:${id}:${p.id}` }))));
   }
@@ -2341,8 +2385,41 @@ async function ownerLink(env, chat, url, n, origin) {
     await say(env, chat, fresh ? `👥 加了小号「${alt.name || alt.id}」（第 ${alts.length} 个）。以后它热门前 50 首里库里没有的，不用审核，直接发进频道。` : `👥 「${alt.name || alt.id}」已经是小号了，现在同步一遍。`);
     return syncAlts(env, chat, [alt]);
   }
+  if (d.kind === 'playlist') await importPlaylist(env, chat, url, origin);
   if (n || d.kind === 'song') return ownerHarvest(env, chat, { url }, n, origin);
   return harvestCount(env, chat, url, origin);
+}
+
+// 贴了网易云歌单：照着它在网页上建一个同名歌单（名字、封面、简介、顺序），库里有的马上放进去；
+// 库里没有的接着照旧数一数、出审核单（只搬自己的歌），通过发进频道后自动出现在歌单里，不通过的在歌单里是灰色
+async function importPlaylist(env, chat, url, origin) {
+  let r;
+  try {
+    r = await streamerCall(env, '/harvest/playlist', { url, cookie: (await neteaseAccount(env)).cookie || '' });
+  } catch {
+    return say(env, chat, '歌单没取到（搬运服务在唤醒），过一两分钟再发一次网址');
+  }
+  if (r.status !== 200) return say(env, chat, `歌单没取到：${(r.data && typeof r.data.detail === 'string' && r.data.detail) || '网易云这次没给，过一会儿再发一次'}`);
+  const d = r.data || {};
+  const wanted = (Array.isArray(d.songs) ? d.songs : []).map(cleanWanted).filter(Boolean).slice(0, 1000);
+  if (!/^\d{1,20}$/.test(String(d.id || ''))) return say(env, chat, '歌单没取到：网易云给的数据不对');
+  const pic = String(d.cover || '');
+  const L = lib(env);
+  const { fresh } = await L.putNeteasePlaylist({
+    src: String(d.id), name: String(d.name || '').slice(0, 60) || '网易云歌单', intro: String(d.intro || '').slice(0, 500),
+    pic: /^https:\/\/p\d+\.music\.126\.net\/\S+$/.test(pic) ? pic.slice(0, 300) : '', wanted,
+  });
+  listCache = null;
+  const have = new Set((await L.listTracks()).map(t => norm(t.title) + '|' + norm(t.artist)));
+  const inLib = wanted.filter(w => have.has(norm(w.title) + '|' + norm(w.artist))).length;
+  return say(env, chat, `📋 ${fresh ? '建好' : '更新了'}歌单「${d.name}」：一共 ${wanted.length} 首，小橘音乐里已有的 ${inLib} 首已经按网易云的顺序放进去了` +
+    (wanted.length > inLib ? `，还没有的 ${wanted.length - inLib} 首在歌单里先显示成灰色。` : '。') + `\n${origin}/`);
+}
+
+function cleanWanted(w) {
+  if (!w || !/^\d{1,20}$/.test(String(w.sid || '')) || !w.title) return null;
+  return { sid: String(w.sid), title: String(w.title).slice(0, 200), artist: String(w.artist || '').slice(0, 200),
+    duration: Math.max(0, Math.min(Math.round(Number(w.duration) || 0), 36000)) };
 }
 
 // 贴了专辑、歌单、歌手主页、用户主页的网址（没写数量）：先请流式服务数一数一共几首、库里已有几首，按按钮再抓。
