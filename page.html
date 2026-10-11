@@ -1622,7 +1622,7 @@ h1{font-size:20px;margin:0;line-height:1.2}
       for(var c = 0; c < N; c++){
         var on = Math.round(lv[c] * ROWS);
         for(var r = 0; r < ROWS; r++){
-          if(r >= on) break; // 没声音的时候什么也不画（以前留一排小格子，看着像一条虚线）
+          if(r >= on && r > 0) break; // 最底下一排一直画着：没声音、数据还没到（第一次放要等十几秒）时也看得见音柱
           g.fillStyle = color(c / (N - 1), 50 + r / (ROWS - 1) * 22);
           g.fillRect(c * cw + (cw - bw) / 2, h - (r + 1) * ch, bw, cellH);
         }
