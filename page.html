@@ -981,6 +981,7 @@ h1{font-size:20px;margin:0;line-height:1.2}
     var kind = prefs.tab === 'artist' || prefs.tab === 'list' ? prefs.tab : null;
     list.textContent = '';
     list.classList.remove('skeleton');
+    moreRows = null;
     var shown = 0;
     var g = kind && prefs[OPEN[kind]] != null ? groupOf(kind, prefs[OPEN[kind]]) : null;
     list.classList.toggle('grid', kind === 'list' && !g); // 歌单列表是两列大图
@@ -1017,12 +1018,13 @@ h1{font-size:20px;margin:0;line-height:1.2}
       (hotIds[g.name] || []).forEach(function(id){ ids[id] = 1; });
       while(hotN < src.length && ids[src[hotN].id]) hotN++;
     }
+    var todo = [];
     src.forEach(function(t, i){
       if(q && (t.title + ' ' + t.artist).toLowerCase().indexOf(q) < 0) return;
       if(hotN && i === 0) list.appendChild(el('li', 'section', '热门'));
-      if(hotN && i === hotN) list.appendChild(el('li', 'section', '更多歌曲'));
+      if(hotN && i === hotN) todo.push(function(){ return el('li', 'section', '更多歌曲'); });
       shown++;
-      list.appendChild(row(t, i < hotN ? i + 1 : 0));
+      todo.push(function(){ return row(t, i < hotN ? i + 1 : 0); });
     });
     var s = $('status');
     s.hidden = !!shown;
@@ -1038,10 +1040,31 @@ h1{font-size:20px;margin:0;line-height:1.2}
       } else s.textContent = '频道里还没有音频';
     }
     // 灰色歌排在最后，说明也放最后，不占顶上那一行
-    if(!g && !q && nGrey) list.appendChild(el('li', 'count tail', '上面最后 ' + nGrey + ' 首灰色的暂无音源（网易云没给），只记了歌名、歌手这些信息'));
-    paintFavs();
-    mark();
+    if(!g && !q && nGrey) todo.push(function(){ return el('li', 'count tail', '上面最后 ' + nGrey + ' 首灰色的暂无音源（网易云没给），只记了歌名、歌手这些信息'); });
+    lazyRows(todo);
   }
+
+  // 几千首一次全画出来，手机上第一次打开要卡好几秒：先画一屏多，往下滑快到底时再接着画
+  // （列表在手机上跟着 .panel 滚、电脑上自己滚，所以在捕获阶段听所有滚动，看「接着画」那一行离屏幕底多远）
+  var moreRows = null;
+  function lazyRows(todo){
+    var at = 0;
+    moreRows = function(){
+      var s = list.querySelector('.more');
+      if(s && s.getBoundingClientRect().top > innerHeight + 1500) return;
+      var end = Math.min(todo.length, at + (at ? 200 : 40)), frag = document.createDocumentFragment();
+      for(; at < end; at++) frag.appendChild(todo[at]());
+      if(s) s.remove();
+      if(at < todo.length) frag.appendChild(el('li', 'more'));
+      else moreRows = null;
+      list.appendChild(frag);
+      paintFavs();
+      mark();
+      if(moreRows) requestAnimationFrame(function(){ if(moreRows) moreRows(); }); // 一屏还没铺满（电脑高屏）就接着画
+    };
+    moreRows();
+  }
+  document.addEventListener('scroll', function(){ if(moreRows) moreRows(); }, true);
 
   // 「全部」顶上的推荐区：最近新增、歌单、常听歌手，横着滑。→ 有没有加东西
   function homeRails(){
