@@ -1541,6 +1541,22 @@ await t('播放页和管理页都能取到，内嵌脚本能通过语法检查',
   assert.equal((await req('/admin')).headers.get('X-Robots-Tag'), 'noindex');
 });
 
+await t('播放页显示的歌名：去掉开头的序号和没意思的说明，版本说明（伴奏、DJ、Live）变成小标签；正常的数字歌名不动', async () => {
+  const html = await textOf(await req('/'));
+  const src = html.split('<script>')[1].split('</script>')[0];
+  const niceTitle = new Function(src.slice(src.indexOf('  var VERSIONS'), src.indexOf('  // 歌名 + 版本小标签')) + '; return niceTitle;')();
+  const cases = [
+    ['3.春夏秋冬(伴奏)', '春夏秋冬', ['伴奏']], ['02.冬天的海(歌曲)', '冬天的海', []], ['04. 保持沉默(歌曲)', '保持沉默', []],
+    ['蔓延 (Live版)', '蔓延', ['Live']], ['晴天 - DJ版', '晴天', ['DJ']], ['空空（Live） (我是唱作人2第2期Live)', '空空', ['Live']],
+    ['2002年的第一场雪', '2002年的第一场雪', []], ['1424', '1424', []], ['再等冬天(Memories)', '再等冬天(Memories)', []], ['(歌曲)', '(歌曲)', []],
+  ];
+  for (const [title, nice, tags] of cases) {
+    const t = { title };
+    assert.equal(niceTitle(t), nice, title);
+    assert.deepEqual(t.tags, tags, title);
+  }
+});
+
 await t('任何响应里都不出现机器人 token、管理密钥、流式服务密钥', async () => {
   assert.ok(seen.length > 20);
   for (const s of seen) {

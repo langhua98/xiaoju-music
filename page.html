@@ -45,10 +45,12 @@ body.playing .disc{animation-play-state:running}
 .label{position:absolute;inset:17%;border-radius:50%;overflow:hidden;background:linear-gradient(135deg,#fdba74,#9a3412);box-shadow:0 0 0 4px #050505}
 #art{width:100%;height:100%;object-fit:cover;display:block;opacity:0;transition:opacity .4s}
 #art.ready{opacity:1}
-.cover-fallback{position:absolute;inset:0;display:flex;flex-direction:column;align-items:center;justify-content:center;padding:0 15%;text-align:center;color:rgba(255,255,255,.95);text-shadow:0 2px 14px rgba(0,0,0,.3);opacity:0;transition:opacity .3s}
-/* 文字封面：没有自己专辑图的歌，唱片中间写歌名和歌手 */
+.cover-fallback{position:absolute;inset:0;display:grid;grid-template-rows:1fr 1fr;row-gap:14%;justify-items:center;padding:0 15%;text-align:center;color:rgba(255,255,255,.95);text-shadow:0 2px 14px rgba(0,0,0,.3);opacity:0;transition:opacity .3s}
+/* 文字封面：没有自己专辑图的歌，唱片中间写歌名和歌手。正中间是唱片的圆孔：歌名放在孔的上面，歌手放在孔的下面，不被挡住 */
+.cover-fallback b{align-self:end}
+.cover-fallback small{align-self:start}
 .cover-fallback b{font-size:clamp(17px,4.6vw,28px);font-weight:800;line-height:1.22;letter-spacing:.5px;display:-webkit-box;-webkit-line-clamp:3;-webkit-box-orient:vertical;overflow:hidden;word-break:break-all}
-.cover-fallback small{max-width:100%;margin-top:8px;font-size:clamp(11px,2.6vw,14px);font-weight:500;opacity:.78;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.cover-fallback small{max-width:100%;margin-top:0;font-size:clamp(11px,2.6vw,14px);font-weight:500;opacity:.78;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
 .noart .cover-fallback{opacity:1}
 /* 播放页的强调色跟着封面走（进度条、当前这句歌词、按下的按钮） */
 .stage{--accent:var(--theme,#fb923c)}
@@ -82,6 +84,8 @@ body.lyrics-view .lyrics{display:block}
 .lyrics li.retry{cursor:pointer;text-decoration:underline}
 .ln{min-height:1.5em;margin-top:8px;font-size:17px;font-weight:600;color:var(--accent);white-space:nowrap;overflow:hidden;text-overflow:ellipsis;cursor:pointer}
 body.lyrics-view .ln{visibility:hidden}
+/* 没有歌词：这一行收起来，不留一块空白 */
+.ln:empty{min-height:0;margin-top:0}
 .t{font-size:24px;font-weight:700;line-height:1.25;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
 .a{font-size:17px;color:var(--muted);margin-top:4px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
 .progress{width:100%;margin-top:20px}
@@ -224,6 +228,11 @@ h1{font-size:20px;margin:0;line-height:1.2}
 .acell span{font-size:11.5px;color:var(--faint);margin-top:-4px}
 @media (hover:hover){ .acell:hover{background:var(--hover)} }
 .count.tail{padding:16px 12px 8px;text-align:center}
+.shuffle-row{list-style:none;display:flex;align-items:center;gap:12px;padding:2px 8px 10px}
+.shuffle-all{display:inline-flex;align-items:center;gap:7px;height:38px;padding:0 18px 0 14px;border:0;border-radius:99px;background:var(--accent);color:var(--ink);font:inherit;font-size:15px;font-weight:700;cursor:pointer;box-shadow:0 6px 18px rgba(0,0,0,.25);transition:transform .15s}
+.shuffle-all:active{transform:scale(.96)}
+.shuffle-all .ic{width:18px;height:18px}
+.count-n{font-size:13px;color:var(--faint)}
 /* 歌手详情：「热门」一段带名次（网易云热门 50 首里的），「更多歌曲」一段新的在前 */
 .rank{width:22px;flex:none;text-align:center;font-size:14px;font-weight:700;color:var(--faint);font-variant-numeric:tabular-nums}
 .rank.top{color:var(--accent)}
@@ -237,6 +246,8 @@ h1{font-size:20px;margin:0;line-height:1.2}
 .rt{font-weight:600;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
 .row.on .rt{color:var(--accent)}
 .ra{font-size:12.5px;color:var(--faint);white-space:nowrap;overflow:hidden;text-overflow:ellipsis;margin-top:1px}
+.vtag{font-style:normal;font-size:10.5px;font-weight:600;color:var(--muted);border:1px solid var(--line);border-radius:4px;padding:0 4px;margin-left:6px;position:relative;top:-2px;letter-spacing:.3px}
+.t .vtag{font-size:12px;top:-4px}
 .badge{font-style:normal;font-size:10px;font-weight:700;letter-spacing:.5px;color:var(--accent);border:1px solid color-mix(in srgb,var(--accent) 55%,transparent);border-radius:4px;padding:0 4px;margin-right:6px;position:relative;top:-1px}
 .eq{display:none;align-items:flex-end;gap:2px;width:14px;height:14px;flex:none;margin-right:4px}
 .row.on .eq{display:flex}
@@ -466,7 +477,40 @@ h1{font-size:20px;margin:0;line-height:1.2}
     var h = hue(t.title + t.artist);
     return 'linear-gradient(135deg, hsl(' + h + ' 62% 58%), hsl(' + (h + 38) % 360 + ' 70% 30%))';
   }
-  function firstChar(t){ return Array.from(t.title.trim() || '🍊')[0]; }
+  function firstChar(t){ return Array.from(niceTitle(t).trim() || '🍊')[0]; }
+  // 显示用的歌名：去掉开头的序号（「5.」「1、」），括号里的版本说明（伴奏、DJ、Live……）改成歌名后面的小标签。
+  // 只改显示，搜索、查重照旧用原来的歌名
+  var VERSIONS = [[/伴奏|instrumental|纯音乐|无人声/i, '伴奏'], [/dj|remix|混音|电音/i, 'DJ'], [/live|现场|演唱会/i, 'Live'],
+    [/加速|倍速|\d\.\d+x/i, '加速'], [/降调|升调|变调/i, '变调'], [/片段|铃声/i, '片段'], [/翻唱|cover/i, '翻唱'], [/demo/i, 'Demo']];
+  function versionOf(s){
+    for(var i = 0; i < VERSIONS.length; i++) if(VERSIONS[i][0].test(s)) return VERSIONS[i][1];
+    return '';
+  }
+  function niceTitle(t){
+    if(t.nice != null) return t.nice;
+    var tags = [], s = String(t.title || '').replace(/^\s*\d{1,3}\s*[.、．\-_)）]\s*(?=\D)/, '');
+    s = s.replace(/\s*[(（\[【]([^()（）\[\]【】]{1,24})[)）\]】]/g, function(m, inner){
+      if(/^\s*(歌曲|完整版|正式版|官方版|高音质|无损|hq|sq)\s*$/i.test(inner)) return ''; // 没意思的说明直接去掉
+      var v = versionOf(inner);
+      if(!v) return m;
+      if(tags.indexOf(v) < 0) tags.push(v);
+      return '';
+    });
+    s = s.replace(/\s*[-—]\s*([^-—]{1,12}版)\s*$/, function(m, inner){ // 「歌名 - DJ版」
+      var v = versionOf(inner);
+      if(!v) return m;
+      if(tags.indexOf(v) < 0) tags.push(v);
+      return '';
+    }).trim();
+    t.nice = s || String(t.title || '');
+    t.tags = s ? tags : [];
+    return t.nice;
+  }
+  // 歌名 + 版本小标签，放进 el
+  function titleInto(el, t){
+    el.textContent = niceTitle(t);
+    t.tags.forEach(function(v){ var e = document.createElement('em'); e.className = 'vtag'; e.textContent = v; el.appendChild(e); });
+  }
   function artistOf(t){ return t.artist || '小橘音乐'; }
   function setIcon(btn, name, label){
     btn.querySelector('use').setAttribute('href', '#i-' + name);
@@ -498,7 +542,7 @@ h1{font-size:20px;margin:0;line-height:1.2}
       var fb = holder.querySelector('.cover-fallback');
       if(fb){ // 唱片中间的大文字封面：歌名 + 歌手
         fb.textContent = '';
-        fb.appendChild(el('b', null, t.title));
+        fb.appendChild(el('b', null, niceTitle(t)));
         fb.appendChild(el('small', null, artistOf(t)));
       }
     }
@@ -904,10 +948,8 @@ h1{font-size:20px;margin:0;line-height:1.2}
     }
     if(g) list.appendChild(groupHead(kind, g));
     var src = fav ? favTracks() : rec ? recentTracks() : g ? g.songs : tracks;
-    if(!g && !q && src.length){
-      var nGrey = src.filter(function(t){ return t.grey; }).length;
-      list.appendChild(el('li', 'count', (rec ? '最近听过 ' : '共 ') + (src.length - nGrey) + ' 首' + (nGrey ? '（另有 ' + nGrey + ' 首灰色的暂无音源，排在最后）' : '')));
-    }
+    var nGrey = src.filter(function(t){ return t.grey; }).length;
+    if(!g && !q && src.length > nGrey) list.appendChild(shuffleRow(src, rec ? '最近听过 ' : '', src.length - nGrey));
     // 歌手详情：前面是网易云热门 50 首里的（hotFirst 已经排好），分成「热门」「更多歌曲」两段，热门的带名次
     var hotN = 0;
     if(g && kind === 'artist' && !q){
@@ -935,8 +977,35 @@ h1{font-size:20px;margin:0;line-height:1.2}
         s.appendChild(document.createTextNode('点歌曲旁边的 ♡，就会收进这里'));
       } else s.textContent = '频道里还没有音频';
     }
+    // 灰色歌排在最后，说明也放最后，不占顶上那一行
+    if(!g && !q && nGrey) list.appendChild(el('li', 'count tail', '上面最后 ' + nGrey + ' 首灰色的暂无音源（网易云没给），只记了歌名、歌手这些信息'));
     paintFavs();
     mark();
+  }
+
+  // 列表顶上：一个大的「随机播放」，旁边小字写几首。打开网页面对几千首不知道从哪听起，这是最常用的入口
+  function shuffleRow(src, prefix, n){
+    var li = el('li', 'shuffle-row');
+    var b = el('button', 'shuffle-all');
+    b.type = 'button';
+    b.innerHTML = '<svg class="ic stroke"><use href="#i-shuffle"/></svg>';
+    b.appendChild(document.createTextNode('随机播放'));
+    b.addEventListener('click', function(){ shuffleAll(src); });
+    li.appendChild(b);
+    li.appendChild(el('span', 'count-n', prefix + n + ' 首'));
+    return li;
+  }
+  function shuffleAll(src){
+    var ps = src.filter(function(t){ return t.playable; });
+    if(!ps.length) return;
+    prefs.shuffle = true;
+    prefs.ctx = prefs.tab;
+    if(prefs.tab === 'recent') recentSnap = recent.slice();
+    savePrefs();
+    paintModes();
+    select(ps[Math.floor(Math.random() * ps.length)].id);
+    start();
+    toast('随机播放');
   }
 
   // rank：歌手热门歌的名次（1 开始），0 = 不显示
@@ -954,10 +1023,12 @@ h1{font-size:20px;margin:0;line-height:1.2}
     th.appendChild(img);
     coverImg(img, th, t.id);
     var info = el('span', 'info');
-    info.appendChild(el('span', 'rt', t.title));
+    var rt = el('span', 'rt');
+    titleInto(rt, t);
+    info.appendChild(rt);
     var ra = el('span', 'ra');
     if(t.mime === 'audio/flac') ra.appendChild(el('em', 'badge', '无损'));
-    ra.appendChild(document.createTextNode(t.playable ? [t.artist, fmt(t.duration)].filter(Boolean).join(' · ')
+    ra.appendChild(document.createTextNode(t.playable ? [artistOf(t), fmt(t.duration)].filter(Boolean).join(' · ')
       : t.pl ? [t.artist, t.grey].filter(Boolean).join(' · ') // 网易云歌单里还没搬进来的：等审核
       : t.grey ? [t.artist, '暂无音源（' + t.grey + '）'].filter(Boolean).join(' · ') : '暂时不能在网页播放'));
     info.appendChild(ra);
@@ -1009,9 +1080,9 @@ h1{font-size:20px;margin:0;line-height:1.2}
     clearTimeout(retryTimer);
     setWaking(false);
     audio.src = '/a/' + id;
-    $('t').textContent = t.title;
+    titleInto($('t'), t);
     $('a').textContent = artistOf(t);
-    $('miniT').textContent = t.title;
+    $('miniT').textContent = niceTitle(t);
     paintMiniSub();
     coverImg($('art'), $('coverWrap'), id);
     coverImg($('miniArt'), $('miniThumb'), id);
@@ -1023,11 +1094,11 @@ h1{font-size:20px;margin:0;line-height:1.2}
     $('like').setAttribute('aria-pressed', String(isFav(id)));
     syncPos();
     $('mini').hidden = false;
-    document.title = t.title + ' · 小橘音乐';
+    document.title = niceTitle(t) + ' · 小橘音乐';
     paint(0, t.duration);
     if('mediaSession' in navigator && typeof MediaMetadata !== 'undefined'){
       navigator.mediaSession.metadata = new MediaMetadata({
-        title: t.title, artist: artistOf(t), album: '小橘音乐',
+        title: niceTitle(t) + (t.tags.length ? '（' + t.tags.join(' · ') + '）' : ''), artist: artistOf(t), album: '小橘音乐',
         artwork: [{ src: location.origin + coverUrl(id), sizes: '320x320', type: 'image/jpeg' }]
       });
     }
@@ -1364,7 +1435,7 @@ h1{font-size:20px;margin:0;line-height:1.2}
       for(var c = 0; c < N; c++){
         var on = Math.round(lv[c] * ROWS);
         for(var r = 0; r < ROWS; r++){
-          if(r >= on && r > 0) break;
+          if(r >= on) break; // 没声音的时候什么也不画（以前留一排小格子，看着像一条虚线）
           g.fillStyle = color(c / (N - 1), 50 + r / (ROWS - 1) * 22);
           g.fillRect(c * cw + (cw - bw) / 2, h - (r + 1) * ch, bw, cellH);
         }
