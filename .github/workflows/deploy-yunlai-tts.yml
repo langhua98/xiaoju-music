@@ -4,10 +4,6 @@
 name: Deploy yunlai-tts
 on:
   workflow_dispatch:
-  # 临时：试 Cloudflare 期间，推这个分支就部署一次（合进 main 前去掉）
-  push:
-    branches: [claude/yunlai-robot-animation-v6xpwj]
-    paths: ["yunlai-tts/**", ".github/workflows/deploy-yunlai-tts.yml"]
 jobs:
   deploy:
     runs-on: ubuntu-latest
