@@ -1,0 +1,44 @@
+# 部署 yunlai-tts/worker.js 到 Cloudflare Worker yunlai-tts（Yunlai 机器人的语音，Workers AI 上的 MeloTTS），
+# 再用几句中文测一下耗时，MP3 存成 artifact 可以下载试听。和小橘音乐无关，只是共用 CLOUDFLARE_API_TOKEN。
+# 手动跑：Actions → Deploy yunlai-tts → Run workflow。
+name: Deploy yunlai-tts
+on:
+  workflow_dispatch:
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Upload to Cloudflare
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+        run: |
+          if [ -z "$CLOUDFLARE_API_TOKEN" ]; then echo "缺少仓库 secret CLOUDFLARE_API_TOKEN"; exit 1; fi
+          ACC=aca35ff5f62ae4208757219dbc3b489b
+          API=https://api.cloudflare.com/client/v4/accounts/$ACC/workers/scripts/yunlai-tts
+          check='import json,sys; d=json.load(sys.stdin); print(sys.argv[1], "success:", d.get("success"), "| errors:", d.get("errors")); sys.exit(0 if d.get("success") else 1)'
+          curl -sS -X PUT "$API" -H "Authorization: Bearer $CLOUDFLARE_API_TOKEN" \
+            -F 'metadata={"main_module":"worker.js","compatibility_date":"2026-01-01","bindings":[{"type":"ai","name":"AI"}]};type=application/json' \
+            -F 'worker.js=@yunlai-tts/worker.js;type=application/javascript+module' | python3 -c "$check" upload
+          # 打开 yunlai-tts.langhua98.workers.dev 这个地址
+          curl -sS -X POST "$API/subdomain" -H "Authorization: Bearer $CLOUDFLARE_API_TOKEN" -H "Content-Type: application/json" \
+            -d '{"enabled":true,"previews_enabled":false}' | python3 -c "$check" subdomain
+      - name: Time a few sentences
+        run: |
+          base=https://yunlai-tts.langhua98.workers.dev
+          for i in 1 2 3 4 5 6; do curl -fsS "$base/health" && break; sleep 5; done; echo
+          mkdir -p samples
+          i=0
+          for lang in zh ZH; do
+            for t in "你好呀，我是云来。" "今天天气不错，要不要我帮你看看外面有什么好玩的？" "好的，马上来。" "你好呀，我是云来。"; do
+              i=$((i+1))
+              curl -sS -G -o "samples/$i-$lang.mp3" \
+                -w "$lang %{http_code} %{content_type} %{size_download}B first-byte %{time_starttransfer}s total %{time_total}s  cache=%header{x-cache}  $t\n" \
+                --data-urlencode "text=$t" --data-urlencode "lang=$lang" "$base/tts"
+            done
+          done
+          for f in samples/*; do head -c 300 "$f" | grep -q detail && { echo "$f:"; head -c 300 "$f"; echo; }; done; true
+      - uses: actions/upload-artifact@v4
+        with:
+          name: yunlai-tts-samples
+          path: samples/

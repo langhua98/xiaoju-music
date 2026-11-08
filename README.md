@@ -293,3 +293,10 @@ Space 的 `Dockerfile`、`requirements.txt` 归视频仓库管：音乐要加新
   清掉它存的数据，收藏也在内。
 - `workers.dev` 在中国大陆被屏蔽，不开 VPN 打不开；要给国内用户用，需要绑定自定义域名。
 - 音频不经 Cloudflare 缓存，每次都从 Telegram 现取，第一次播放首字节约 1～2 秒。
+
+## 附：Yunlai 机器人的语音（`yunlai-tts/`）
+
+和小橘音乐没有关系，只是借这个仓库的 Cloudflare 部署令牌：`yunlai-tts/worker.js` 是 Cloudflare Worker `yunlai-tts`，
+用 Workers AI 上的 MeloTTS 合成中文语音，给小橘遥控（`langhua98/xiaoju-remote`）的机器人模式读回答。
+`GET https://yunlai-tts.langhua98.workers.dev/tts?text=一句话` → MP3。部署：Actions → **Deploy yunlai-tts** → Run workflow
+（上传、打开 workers.dev 地址，再测几句中文的耗时）。
